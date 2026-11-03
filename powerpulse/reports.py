@@ -1,6 +1,6 @@
 from datetime import date
 
-from . import store
+from . import archive, store
 from .executor import global_targets
 from .occurrences import (REPEATS, fmt_date, in_range, period_range, status_for,
                           weekdays_text)
@@ -33,10 +33,22 @@ def build_report(scope: str, period: str, ref: date,
                 for d, items in sorted(in_range(store.globals_.all(), d0, d1).items()) for g in items]
     else:
         title = f"Informe {PERIODS[period].lower()} de programaciones ({span})"
-        headers = ["Fecha", "Hora", "IP", "Etiqueta", "Repetición", "Notas", "Estado"]
-        rows = [[fmt_date(d), s["time"], s["ip"], assignments.get(s["ip"], {}).get("label", s.get("label", "")),
-                 REPEATS[s["repeat"]], s.get("notes", ""), status_for(s, d, hist)]
-                for d, items in sorted(in_range(store.schedules.all(), d0, d1).items()) for s in items]
+        headers = ["Fecha", "Hora", "Origen", "IP", "Etiqueta", "Repetición", "Notas", "Estado"]
+        entries = []
+        for d, items in in_range(store.schedules.all() + archive.as_schedules(), d0, d1).items():
+            for s in items:
+                entries.append((d, s["time"], 0, [
+                    fmt_date(d), s["time"], "Calendario", s["ip"],
+                    assignments.get(s["ip"], {}).get("label", s.get("label", "")),
+                    REPEATS[s["repeat"]], s.get("notes", ""), status_for(s, d, hist)]))
+        for d, items in in_range(store.globals_.all(), d0, d1).items():
+            for g in items:
+                excluded = g.get("excluded_ips", [])
+                entries.append((d, g["time"], 1, [
+                    fmt_date(d), g["time"], "Global", f"Todos ({len(global_targets(g))} equipos)", g["name"],
+                    REPEATS[g["repeat"]], f"Excluidos: {', '.join(excluded)}" if excluded else "",
+                    status_for(g, d, hist)]))
+        rows = [e[3] for e in sorted(entries, key=lambda e: e[:3])]
     return title, headers, rows
 
 

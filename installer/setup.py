@@ -8,8 +8,10 @@ import winreg
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+from powerpulse import background
+
 APP = "PowerPulse"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 PUBLISHER = "PowerPulse"
 UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP}"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -29,7 +31,8 @@ def make_shortcut(link: Path, target: Path, icon: Path) -> None:
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, creationflags=NO_WINDOW)
 
 
-def install(dest: Path, desktop: bool) -> Path:
+def install(dest: Path, desktop: bool, task: bool) -> Path:
+    background.uninstall()  # libera PowerPulse.exe si la tarea lo estuviera usando
     dest.mkdir(parents=True, exist_ok=True)
     exe = dest / f"{APP}.exe"
     shutil.copy2(BUNDLE / f"{APP}.exe", exe)
@@ -40,6 +43,10 @@ def install(dest: Path, desktop: bool) -> Path:
     make_shortcut(START_MENU / f"{APP}.lnk", exe, dest / "icon.ico")
     if desktop:
         make_shortcut(DESKTOP / f"{APP}.lnk", exe, dest / "icon.ico")
+    if task:
+        ok, msg = background.install(exe)
+        if not ok:
+            raise OSError(f"No se pudo crear la tarea programada:\n{msg}")
 
     size_kb = sum(f.stat().st_size for f in dest.iterdir()) // 1024
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
@@ -64,6 +71,7 @@ def uninstall() -> None:
     dest = Path(sys.executable).parent
     for link in (START_MENU / f"{APP}.lnk", DESKTOP / f"{APP}.lnk"):
         link.unlink(missing_ok=True)
+    background.uninstall()
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
     except OSError:
@@ -97,7 +105,10 @@ class Wizard(tk.Tk):
         ttk.Button(row, text="Examinar...", command=self.browse).pack(side="left", padx=4)
         self.desktop = tk.BooleanVar(value=True)
         self.launch = tk.BooleanVar(value=True)
+        self.task = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="Crear acceso directo en el escritorio", variable=self.desktop).grid(sticky="w", pady=(10, 0))
+        ttk.Checkbutton(f, text="Apagar equipos programados aunque PowerPulse esté cerrado (tarea de Windows)",
+                        variable=self.task).grid(sticky="w")
         ttk.Checkbutton(f, text="Ejecutar PowerPulse al terminar", variable=self.launch).grid(sticky="w")
         bar = ttk.Frame(f)
         bar.grid(sticky="e", pady=(14, 0))
@@ -111,7 +122,7 @@ class Wizard(tk.Tk):
 
     def run(self):
         try:
-            exe = install(Path(self.path.get()), self.desktop.get())
+            exe = install(Path(self.path.get()), self.desktop.get(), self.task.get())
         except (OSError, subprocess.CalledProcessError) as exc:
             messagebox.showerror(APP, f"No se pudo instalar:\n{exc}", parent=self)
             return

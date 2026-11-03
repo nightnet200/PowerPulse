@@ -3,7 +3,7 @@
 
 a = Analysis(
     ['C:/Users/33334082K/Desktop/Dev/PowerPulse/installer/setup.py'],
-    pathex=[],
+    pathex=['C:/Users/33334082K/Desktop/Dev/PowerPulse'],
     binaries=[],
     datas=[('C:/Users/33334082K/Desktop/Dev/PowerPulse/assets/icon.ico', '.'), ('C:/Users/33334082K/Desktop/Dev/PowerPulse/Output/PowerPulse.exe', '.')],
     hiddenimports=[],

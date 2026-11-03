@@ -15,6 +15,7 @@ New-Item -ItemType Directory -Force $out | Out-Null
 
 & $py -m PyInstaller --noconfirm --clean --onefile --windowed --name PowerPulse-Setup `
     --icon "$root\assets\icon.ico" --add-data "$root\assets\icon.ico;." `
+    --paths "$root" `
     --add-data "$out\PowerPulse.exe;." `
     --distpath $out --workpath build\setup --specpath build "$root\installer\setup.py"
 

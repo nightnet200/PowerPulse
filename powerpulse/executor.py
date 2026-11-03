@@ -1,12 +1,39 @@
+import msvcrt
 import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
-from . import store
+from . import paths, store
 from .occurrences import dates_for
 
 log = store.log
+
+
+@contextmanager
+def _single_instance():
+    """Bloqueo entre procesos: evita que la app y la tarea en segundo plano apaguen a la vez."""
+    f = open(paths.DATA_DIR / "scheduler.lock", "a+")
+    try:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+    except OSError:
+        f.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        f.close()
+
+
+def tick_once() -> None:
+    """Una pasada del planificador, usada por la tarea de Windows con la app cerrada."""
+    store.setup_logging()
+    Scheduler().tick()
 
 
 def shutdown_host(ip: str, delay: int, dry_run: bool) -> tuple[bool, str]:
@@ -66,6 +93,13 @@ class Scheduler(threading.Thread):
         log.info("Planificador detenido")
 
     def tick(self) -> None:
+        with _single_instance() as acquired:
+            if acquired:
+                self._tick_locked()
+
+    def _tick_locked(self) -> None:
+        from . import archive
+        archive.archive_finished()
         settings = store.load_settings()
         now = datetime.now()
         today = now.date()

@@ -3,25 +3,47 @@ import logging
 import os
 import threading
 import uuid
-from datetime import datetime
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import paths
 
 _lock = threading.RLock()
 log = logging.getLogger("powerpulse")
+LOG_RETENTION_DAYS = 90
+
+
+class DailyFileHandler(logging.Handler):
+    """Escribe en un fichero por día, abriéndolo en cada registro para poder compartirlo entre procesos."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            path = paths.LOG_DIR / f"powerpulse_{datetime.now():%Y-%m-%d}.log"
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(self.format(record) + "\n")
+        except OSError:
+            pass
+
+
+def log_files() -> list[Path]:
+    legacy = [paths.LOG_FILE] if paths.LOG_FILE.exists() else []
+    return legacy + sorted(paths.LOG_DIR.glob("powerpulse_*.log"))
 
 
 def setup_logging() -> None:
     if log.handlers:
         return
     log.setLevel(logging.INFO)
-    handler = TimedRotatingFileHandler(
-        paths.LOG_FILE, when="midnight", backupCount=90, encoding="utf-8"
-    )
+    handler = DailyFileHandler()
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
     log.addHandler(handler)
+    limit = datetime.now() - timedelta(days=LOG_RETENTION_DAYS)
+    for f in log_files():
+        try:
+            if datetime.fromtimestamp(f.stat().st_mtime) < limit:
+                f.unlink()
+        except OSError:
+            pass
 
 
 def _read(path: Path, default):
@@ -29,7 +51,7 @@ def _read(path: Path, default):
         if not path.exists():
             return default
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
         except (json.JSONDecodeError, OSError) as exc:
             log.error("No se pudo leer %s: %s", path, exc)
             return default
@@ -98,8 +120,10 @@ class HistoryStore(JsonStore):
 schedules = JsonStore(paths.SCHEDULES_FILE, "PROGRAMACION")
 globals_ = JsonStore(paths.GLOBAL_FILE, "GLOBAL")
 history = HistoryStore(paths.HISTORY_FILE, "HISTORIAL")
+archive = JsonStore(paths.ARCHIVE_FILE, "HISTORICO")
 
-DEFAULT_SETTINGS = {"dry_run": True, "delay_seconds": 60, "grace_minutes": 15, "theme": "light"}
+DEFAULT_SETTINGS = {"dry_run": True, "delay_seconds": 60, "grace_minutes": 15, "theme": "light",
+                    "backup_dir": "", "always_on_top": True}
 
 
 def load_settings() -> dict:

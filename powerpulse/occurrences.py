@@ -1,7 +1,8 @@
 import calendar
 from datetime import date, datetime, timedelta
 
-REPEATS = {"none": "Una vez", "daily": "Diaria", "weekly": "Semanal", "monthly": "Mensual"}
+REPEATS = {"none": "Una vez", "daily": "Diaria", "weekly": "Semanal", "monthly": "Mensual",
+           "range": "Rango de días"}
 WEEKDAYS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
 
 
@@ -48,7 +49,7 @@ def dates_for(item: dict, d0: date, d1: date) -> list[date]:
     if repeat == "none":
         return [start] if d0 <= start <= d1 else []
     days = (first + timedelta(days=n) for n in range((end - first).days + 1))
-    if repeat == "daily":
+    if repeat in ("daily", "range"):
         return list(days)
     if repeat == "weekly":
         wd = set(item.get("weekdays") or [start.weekday()])
