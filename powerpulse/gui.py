@@ -1,14 +1,14 @@
 import calendar
+import hashlib
 import os
-import threading
 import tkinter as tk
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from tkinter import filedialog, ttk
 
-from . import __version__, archive, background, backup, paths, reports, store, theme
+from . import __version__, archive, background, backup, paths, reports, schedule_txt, store, theme
 from . import dialogs as messagebox
-from .executor import Scheduler, global_targets
+from .schedule_targets import included_ips, scope_ips
 from .occurrences import (REPEATS, WEEKDAYS, dates_for, fmt_date, in_range, parse_time,
                           parse_user_date, period_range, status_for, weekdays_text)
 
@@ -45,6 +45,29 @@ def _matches(needle: str, values) -> bool:
     return not needle or needle.lower() in " ".join(str(v) for v in values).lower()
 
 
+def _schedule_equipment_text(item: dict) -> str:
+    if item.get("target_mode") == "all":
+        count = len(item.get("excluded_ips", []))
+        return f"Todos ({count} excluidos)" if count else "Todos"
+    if "ips" not in item:
+        return item.get("ip", "")
+    if item.get("target_mode") == "individual" and len(included_ips(item)) == 1:
+        return included_ips(item)[0]
+    excluded = len(item.get("excluded_ips", []))
+    count = len(included_ips(item))
+    noun = "equipo" if count == 1 else "equipos"
+    suffix = f" ({excluded} excluidos)" if excluded else ""
+    return f"{count} {noun}{suffix}"
+
+
+def _schedule_search_values(item: dict) -> list[str]:
+    return [_schedule_equipment_text(item), *scope_ips(item)]
+
+
+def _schedule_label(item: dict) -> str:
+    return item.get("schedule_label") or item.get("label", "")
+
+
 class EquipmentPicker(ttk.Frame):
     """Lista de equipos con buscador; conserva la selección al filtrar."""
 
@@ -60,7 +83,9 @@ class EquipmentPicker(ttk.Frame):
         ttk.Label(top, text="Buscar:").pack(side="left")
         ttk.Entry(top, textvariable=self.needle).pack(side="left", fill="x", expand=True, padx=4)
         self.count = ttk.Label(self)
-        if selectmode == "multiple":
+        if selectmode != "browse":
+            ttk.Button(top, text="Seleccionar todos",
+                       command=lambda: self.select(a["ip"] for a in self.assignments)).pack(side="left")
             ttk.Button(top, text="Marcar visibles", command=self.mark_visible).pack(side="left")
             ttk.Button(top, text="Quitar todos", command=lambda: self.select([])).pack(side="left", padx=4)
             self.count.pack(anchor="w")
@@ -221,7 +246,7 @@ class TimePicker(ttk.Frame):
 
 
 class TimingForm(ttk.Frame):
-    """Campos de fecha/hora/repetición compartidos por programaciones y globales."""
+    """Campos de fecha/hora/repetición para las programaciones del calendario."""
 
     def __init__(self, parent, item: dict | None, default_date: date):
         super().__init__(parent)
@@ -304,52 +329,129 @@ class _Dialog(tk.Toplevel):
 class ScheduleDialog(_Dialog):
     def __init__(self, parent, item: dict | None, default_date: date):
         super().__init__(parent, "Editar programación" if item else "Nueva programación")
-        self.editing = item is not None
-        ttk.Label(self.body, text="Equipo(s):").pack(anchor="w")
-        self.picker = EquipmentPicker(self.body, "browse" if self.editing else "extended")
-        self.picker.pack(fill="both", expand=True)
-        if item:
-            self.picker.select([item["ip"]])
+        old_scope = scope_ips(item) if item else []
+        if item and item.get("target_mode") == "all":
+            initial_mode = "all"
+        elif len(old_scope) > 1 or (item and item.get("excluded_ips")):
+            initial_mode = "saved"
         else:
-            ttk.Label(self.body, text="Ctrl/Mayús para seleccionar varios equipos.",
-                      foreground="gray").pack(anchor="w")
+            initial_mode = "individual"
+        self.mode = tk.StringVar(value=initial_mode)
+        choices = ttk.Frame(self.body)
+        choices.pack(fill="x")
+        ttk.Radiobutton(choices, text="Individual", variable=self.mode, value="individual",
+                        command=self._show_mode).pack(side="left")
+        ttk.Radiobutton(choices, text="Todos con exclusiones", variable=self.mode, value="all",
+                        command=self._show_mode).pack(side="left", padx=12)
+        if initial_mode == "saved":
+            ttk.Radiobutton(choices, text="Selección guardada", variable=self.mode, value="saved",
+                            command=self._show_mode).pack(side="left")
+        self.target_area = ttk.Frame(self.body)
+        self.target_area.pack(fill="both", expand=True, pady=(6, 0))
+        self.individual_frame = ttk.Frame(self.target_area)
+        ttk.Label(self.individual_frame, text="Seleccione un equipo:").pack(anchor="w")
+        self.individual_picker = EquipmentPicker(self.individual_frame, "browse")
+        self.individual_picker.pack(fill="both", expand=True)
+        if initial_mode == "individual" and old_scope:
+            self.individual_picker.select(old_scope)
+        self.saved_frame = ttk.Frame(self.target_area)
+        if initial_mode == "saved":
+            ttk.Label(self.saved_frame, text="Equipos de la selección guardada:").pack(anchor="w")
+            self.saved_picker = EquipmentPicker(self.saved_frame, "extended")
+            self.saved_picker.pack(fill="both", expand=True)
+            self.saved_picker.select(old_scope)
+        self.all_frame = ttk.Frame(self.target_area)
+        ttk.Label(self.all_frame, text="Incluye los equipos actuales y los que se añadan a MapPulse.",
+                  wraplength=500).pack(anchor="w")
+        self.excluded_ips = set((item or {}).get("excluded_ips", []))
+        self.all_summary = self._exclusions_bar(self.all_frame)
+        self.saved_summary = self._exclusions_bar(self.saved_frame) if initial_mode == "saved" else None
+        self._update_exclusion_summary()
+        self._show_mode()
         self.timing = TimingForm(self.body, item, default_date)
         self.timing.pack(fill="x", pady=8)
+        ttk.Label(self.body, text="Etiqueta personalizada (opcional):").pack(anchor="w")
+        self.label = tk.StringVar(value=(item or {}).get("schedule_label", ""))
+        ttk.Entry(self.body, textvariable=self.label).pack(fill="x")
         ttk.Label(self.body, text="Notas:").pack(anchor="w")
         self.notes = tk.StringVar(value=(item or {}).get("notes", ""))
         ttk.Entry(self.body, textvariable=self.notes).pack(fill="x")
         self.finish_layout()
 
+    def _exclusions_bar(self, parent):
+        exclusions = ttk.Frame(parent)
+        exclusions.pack(fill="x", pady=(5, 0))
+        ttk.Button(exclusions, text="Gestionar excluidos…", command=self.manage_exclusions).pack(side="left")
+        summary = ttk.Label(exclusions)
+        summary.pack(side="left", padx=8)
+        return summary
+
+    def _show_mode(self):
+        for frame in (self.individual_frame, self.all_frame, self.saved_frame):
+            frame.pack_forget()
+        frame = {"individual": self.individual_frame, "all": self.all_frame,
+                 "saved": self.saved_frame}[self.mode.get()]
+        frame.pack(fill="both", expand=True)
+
+    def manage_exclusions(self):
+        dlg = ExcludedEquipmentDialog(self, self.excluded_ips)
+        self.wait_window(dlg)
+        if dlg.result is not None:
+            self.excluded_ips = set(dlg.result)
+            self._update_exclusion_summary()
+
+    def _update_exclusion_summary(self):
+        count = len(self.excluded_ips)
+        noun = "equipo" if count == 1 else "equipos"
+        status = "excluido" if count == 1 else "excluidos"
+        text = f"{count} {noun} {status}" if count else "Ninguno"
+        self.all_summary.config(text=text)
+        if self.saved_summary is not None:
+            self.saved_summary.config(text=text)
+
     def collect(self):
-        targets = self.picker.selected_assignments()
-        if not targets:
-            raise ValueError("Seleccione al menos un equipo")
+        mode = self.mode.get()
+        if mode == "individual":
+            scope = self.individual_picker.selected
+            if len(scope) != 1:
+                raise ValueError("Seleccione un equipo para la programación individual")
+            excluded = set()
+        elif mode == "saved":
+            scope = self.saved_picker.selected
+            excluded = self.excluded_ips
+            if not scope:
+                raise ValueError("Seleccione al menos un equipo para la programación")
+            if excluded - scope:
+                raise ValueError("Los equipos excluidos deben estar dentro de los equipos seleccionados")
+            if not scope - excluded:
+                raise ValueError("No puede excluir todos los equipos seleccionados")
+        else:
+            scope = set()
+            excluded = self.excluded_ips
+            assignments = store.load_assignments_strict()
+            if not {a["ip"] for a in assignments} - excluded:
+                raise ValueError("Debe haber al menos un equipo de MapPulse sin excluir")
         timing = self.timing.values()
         if archive.is_finished(timing):
             raise ValueError("La programación ya habría finalizado (fechas pasadas). Indique una fecha futura.")
-        return {"targets": targets, "timing": timing,
+        return {"target_mode": "all" if mode == "all" else "individual" if mode == "individual" else "selected",
+                "ips": sorted(scope), "excluded_ips": sorted(excluded),
+                "timing": timing,
+                "schedule_label": self.label.get().strip(),
                 "notes": self.notes.get().strip()}
 
 
-class GlobalDialog(_Dialog):
-    def __init__(self, parent, item: dict | None, default_date: date):
-        super().__init__(parent, "Editar global" if item else "Nueva programación global")
-        ttk.Label(self.body, text="Nombre:").pack(anchor="w")
-        self.name = tk.StringVar(value=(item or {}).get("name", ""))
-        ttk.Entry(self.body, textvariable=self.name).pack(fill="x")
-        self.timing = TimingForm(self.body, item, default_date)
-        self.timing.pack(fill="x", pady=8)
-        ttk.Label(self.body, text="Equipos EXCLUIDOS del apagado (clic para marcar/desmarcar):").pack(anchor="w")
-        self.picker = EquipmentPicker(self.body, "multiple")
+class ExcludedEquipmentDialog(_Dialog):
+    def __init__(self, parent, excluded_ips: set[str]):
+        super().__init__(parent, "Equipos excluidos")
+        ttk.Label(self.body, text="Seleccione los equipos que no deben incluirse:").pack(anchor="w")
+        self.picker = EquipmentPicker(self.body, "extended", height=12)
         self.picker.pack(fill="both", expand=True)
-        self.picker.select((item or {}).get("excluded_ips", []))
+        self.picker.select(excluded_ips)
         self.finish_layout()
 
     def collect(self):
-        if not self.name.get().strip():
-            raise ValueError("Indique un nombre")
-        return {"name": self.name.get().strip(), "timing": self.timing.values(),
-                "excluded_ips": sorted(self.picker.selected)}
+        return sorted(self.picker.selected)
 
 
 def _crud_buttons(parent, app, new, edit, delete):
@@ -358,7 +460,7 @@ def _crud_buttons(parent, app, new, edit, delete):
     ttk.Button(bar, text="Nuevo", command=new).pack(side="left")
     ttk.Button(bar, text="Editar", command=edit).pack(side="left", padx=4)
     ttk.Button(bar, text="Borrar", command=delete).pack(side="left")
-    ttk.Button(bar, text="Actualizar", command=app.refresh_all).pack(side="left", padx=4)
+    ttk.Button(bar, text="Actualizar", command=app.refresh_and_cleanup).pack(side="left", padx=4)
     return bar
 
 
@@ -366,9 +468,11 @@ def schedule_new(app, parent, default_date: date):
     dlg = ScheduleDialog(parent, None, default_date)
     parent.wait_window(dlg)
     if dlg.result:
-        for a in dlg.result["targets"]:
-            store.schedules.add({"ip": a["ip"], "label": a.get("label", ""),
-                                 "notes": dlg.result["notes"], **dlg.result["timing"]})
+        store.schedules.add({"target_mode": dlg.result["target_mode"], "ips": dlg.result["ips"],
+                             "excluded_ips": dlg.result["excluded_ips"],
+                             "schedule_label": dlg.result["schedule_label"],
+                             "notes": dlg.result["notes"], **dlg.result["timing"]})
+        app.generate_schedule_txts(parent)
         app.refresh_all()
 
 
@@ -380,9 +484,15 @@ def schedule_edit(app, parent, item_id: str | None):
     dlg = ScheduleDialog(parent, item, date.today())
     parent.wait_window(dlg)
     if dlg.result:
-        a = dlg.result["targets"][0]
-        store.schedules.update(item_id, {"ip": a["ip"], "label": a.get("label", ""),
+        legacy_label = item.get("label", "") if (
+            dlg.result["target_mode"] == "individual" and
+            dlg.result["ips"] == scope_ips(item)) else ""
+        store.schedules.update(item_id, {"target_mode": dlg.result["target_mode"], "ips": dlg.result["ips"],
+                                         "excluded_ips": dlg.result["excluded_ips"],
+                                         "ip": None, "label": legacy_label,
+                                         "schedule_label": dlg.result["schedule_label"],
                                          "notes": dlg.result["notes"], **dlg.result["timing"]})
+        app.generate_schedule_txts(parent)
         app.refresh_all()
 
 
@@ -392,13 +502,23 @@ def schedule_delete(app, parent, item_id: str | None):
         messagebox.showinfo("PowerPulse", "Seleccione una programación.", parent=parent)
         return
     extra = "\nSe eliminará toda la serie repetida." if item["repeat"] != "none" else ""
-    if messagebox.askyesno("Borrar", f"¿Borrar la programación de {item['ip']}?{extra}", parent=parent):
-        store.schedules.delete(item_id)
+    targets = included_ips(item)
+    count = len(targets)
+    noun = "equipo" if count == 1 else "equipos"
+    target_text = item.get("ip") or f"{count} {noun}"
+    if messagebox.askyesno("Borrar", f"¿Borrar la programación de {target_text}?{extra}", parent=parent):
+        try:
+            archive.delete_to_history(item_id)
+        except (OSError, ValueError, KeyError) as exc:
+            store.log.exception("No se pudo conservar la programación eliminada en el histórico")
+            messagebox.showerror("Borrar", f"No se pudo borrar la programación:\n{exc}", parent=parent)
+            return
+        app.generate_schedule_txts(parent)
         app.refresh_all()
 
 
 class ScheduleTab(ttk.Frame):
-    COLS = {"Fecha": 90, "Hora": 60, "IP": 120, "Etiqueta": 180, "Repetición": 90,
+    COLS = {"Fecha": 90, "Hora": 60, "Equipos": 120, "Etiqueta": 180, "Repetición": 90,
             "Días": 140, "Hasta": 90, "Activa": 60, "Estado": 110, "Notas": 200}
 
     def __init__(self, parent, app):
@@ -407,6 +527,10 @@ class ScheduleTab(ttk.Frame):
         bar = _crud_buttons(self, app, lambda: schedule_new(app, self, date.today()),
                             lambda: schedule_edit(app, self, _selected_id(self.tree)),
                             lambda: schedule_delete(app, self, _selected_id(self.tree)))
+        ttk.Button(bar, text="Generar TXT", command=lambda: app.generate_schedule_txts(self, notify=True)).pack(
+            side="left", padx=4)
+        ttk.Label(self, text=f"Archivos diarios en: {schedule_txt.OUTPUT_DIR} "
+                             f"(365 días para repeticiones sin fecha final)").pack(anchor="w", pady=(0, 6))
         self.filter = tk.StringVar()
         self.filter.trace_add("write", lambda *_: self.refresh())
         _search_box(bar, self.filter)
@@ -422,69 +546,12 @@ class ScheduleTab(ttk.Frame):
             hits = [k.split("|")[1] for k in hist if k.startswith(s["id"])]
             status = hist[f"{s['id']}|{max(hits)}"]["status"] if hits else (
                 "Pendiente" if s.get("enabled", True) else "Desactivada")
-            row = (fmt_date(s["start_date"]), s["time"], s["ip"], s.get("label", ""),
+            row = (fmt_date(s["start_date"]), s["time"], _schedule_equipment_text(s), _schedule_label(s),
                    REPEATS[s["repeat"]], weekdays_text(s), fmt_date(s.get("until")),
                    "Sí" if s.get("enabled", True) else "No", status, s.get("notes", ""))
-            if not _matches(needle, row):
+            if not _matches(needle, [*row, *_schedule_search_values(s)]):
                 continue
             self.tree.insert("", "end", iid=s["id"], values=row)
-        if sel and self.tree.exists(sel):
-            self.tree.selection_set(sel)
-
-
-class GlobalTab(ttk.Frame):
-    COLS = {"Nombre": 200, "Inicio": 90, "Hora": 60, "Repetición": 90, "Días": 140,
-            "Hasta": 90, "Activa": 60, "Equipos": 70, "Excluidos": 300}
-
-    def __init__(self, parent, app):
-        super().__init__(parent, padding=8)
-        self.app = app
-        bar = _crud_buttons(self, app, self.new, self.edit, self.delete)
-        self.filter = tk.StringVar()
-        self.filter.trace_add("write", lambda *_: self.refresh())
-        _search_box(bar, self.filter)
-        self.tree = _make_tree(self, self.COLS)
-        self.tree.bind("<Double-1>", lambda e: self.edit())
-
-    def new(self):
-        dlg = GlobalDialog(self, None, date.today())
-        self.wait_window(dlg)
-        if dlg.result:
-            r = dlg.result
-            store.globals_.add({"name": r["name"], "excluded_ips": r["excluded_ips"], **r["timing"]})
-            self.app.refresh_all()
-
-    def edit(self):
-        gid = _selected_id(self.tree)
-        item = gid and store.globals_.get(gid)
-        if not item:
-            return messagebox.showinfo("PowerPulse", "Seleccione una programación global.", parent=self)
-        dlg = GlobalDialog(self, item, date.today())
-        self.wait_window(dlg)
-        if dlg.result:
-            r = dlg.result
-            store.globals_.update(gid, {"name": r["name"], "excluded_ips": r["excluded_ips"], **r["timing"]})
-            self.app.refresh_all()
-
-    def delete(self):
-        gid = _selected_id(self.tree)
-        item = gid and store.globals_.get(gid)
-        if not item:
-            return messagebox.showinfo("PowerPulse", "Seleccione una programación global.", parent=self)
-        if messagebox.askyesno("Borrar", f"¿Borrar la programación global '{item['name']}'?", parent=self):
-            store.globals_.delete(gid)
-            self.app.refresh_all()
-
-    def refresh(self):
-        sel = _selected_id(self.tree)
-        self.tree.delete(*self.tree.get_children())
-        for g in store.globals_.all():
-            row = (
-                g["name"], fmt_date(g["start_date"]), g["time"], REPEATS[g["repeat"]],
-                weekdays_text(g), fmt_date(g.get("until")), "Sí" if g.get("enabled", True) else "No",
-                len(global_targets(g)), ", ".join(g.get("excluded_ips", [])))
-            if _matches(self.filter.get(), row):
-                self.tree.insert("", "end", iid=g["id"], values=row)
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
 
@@ -519,10 +586,10 @@ class CalendarTab(ttk.Frame):
         self.filter.trace_add("write", lambda *_: self.refresh())
         ttk.Button(bar, text="Ir a la fecha", command=self.goto_result).pack(side="left")
         _search_box(bar, self.filter)
-        self.tree = _make_tree(self.panel, {"Hora": 60, "IP": 120, "Etiqueta": 200,
+        self.tree = _make_tree(self.panel, {"Hora": 60, "Equipos": 120, "Etiqueta": 200,
                                             "Repetición": 90, "Estado": 110, "Notas": 250})
         self.tree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.tree)))
-        self.stree = _make_tree(self.panel, {"Fecha": 90, "Hora": 60, "IP": 110, "Etiqueta": 170,
+        self.stree = _make_tree(self.panel, {"Fecha": 90, "Hora": 60, "Equipos": 110, "Etiqueta": 170,
                                              "Repetición": 90, "Desde": 90, "Hasta": 90, "Activa": 55,
                                              "Estado": 100, "Notas": 200})
         self.stree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.stree)))
@@ -628,7 +695,7 @@ class CalendarTab(ttk.Frame):
         hist = store.history.status_map()
         for s in items:
             self.tree.insert("", "end", iid=s["id"], values=(
-                s["time"], s["ip"], s.get("label", ""), REPEATS[s["repeat"]],
+                s["time"], _schedule_equipment_text(s), _schedule_label(s), REPEATS[s["repeat"]],
                 status_for(s, self.sel, hist), s.get("notes", "")))
 
     def _fill_search(self):
@@ -643,10 +710,10 @@ class CalendarTab(ttk.Frame):
         found = []
         for s in store.schedules.all():
             focus = self._focus_date(s)
-            row = (fmt_date(focus), s["time"], s["ip"], s.get("label", ""), REPEATS[s["repeat"]],
+            row = (fmt_date(focus), s["time"], _schedule_equipment_text(s), _schedule_label(s), REPEATS[s["repeat"]],
                    fmt_date(s["start_date"]), fmt_date(s.get("until")), "Sí" if s.get("enabled", True) else "No",
                    status_for(s, focus, hist), s.get("notes", ""))
-            if _matches(needle, row) or (day and dates_for(s, day, day)):
+            if _matches(needle, [*row, *_schedule_search_values(s)]) or (day and dates_for(s, day, day)):
                 found.append((focus, s["time"], s["id"], row))
         for _, _, sid, row in sorted(found):
             self.stree.insert("", "end", iid=sid, values=row)
@@ -676,8 +743,8 @@ def export_table(parent, title: str, headers: list[str], rows: list[list[str]], 
 
 
 class ArchiveTab(ttk.Frame):
-    HEADERS = ["Archivada", "Última fecha", "Hora", "IP", "Etiqueta", "Repetición", "Desde", "Hasta",
-               "Estado final", "Notas"]
+    HEADERS = ["Registro", "Última fecha", "Hora", "Equipos", "Etiqueta", "Repetición", "Desde", "Hasta",
+               "Estado", "Notas"]
 
     def __init__(self, parent, app):
         super().__init__(parent, padding=8)
@@ -685,9 +752,8 @@ class ArchiveTab(ttk.Frame):
         self.rows: list[list[str]] = []
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=(0, 6))
-        ttk.Button(bar, text="Eliminar", command=self.delete).pack(side="left")
         ttk.Button(bar, text="Exportar PDF/XLSX...", command=self.export).pack(side="left", padx=4)
-        ttk.Button(bar, text="Actualizar", command=app.refresh_all).pack(side="left")
+        ttk.Button(bar, text="Actualizar", command=app.refresh_and_cleanup).pack(side="left")
         self.filter = tk.StringVar()
         self.filter.trace_add("write", lambda *_: self.refresh())
         _search_box(bar, self.filter)
@@ -699,29 +765,33 @@ class ArchiveTab(ttk.Frame):
         sel = _selected_id(self.tree)
         self.tree.delete(*self.tree.get_children())
         self.rows = []
-        items = sorted(store.archive.all(), key=lambda a: a.get("archived_at", ""), reverse=True)
-        for a in items:
-            row = [a.get("archived_at", "")[:16].replace("T", " "), fmt_date(a.get("last_date")), a["time"],
-                   a["ip"], a.get("label", ""), REPEATS[a["repeat"]], fmt_date(a["start_date"]),
-                   fmt_date(a.get("until")), a.get("final_status", ""), a.get("notes", "")]
-            if _matches(self.filter.get(), row):
+        items = [(a, True) for a in store.archive.all()]
+        archived_ids = {a.get("schedule_id") for a, _ in items}
+        items += [(s, False) for s in store.schedules.all() if s["id"] not in archived_ids]
+        items.sort(key=lambda pair: pair[0].get("created_at", ""), reverse=True)
+        for a, archived in items:
+            last = a.get("last_date") if archived else archive.last_date(a)
+            if archived:
+                status = a.get("final_status", "Archivada")
+            elif not a.get("enabled", True):
+                status = "Desactivada"
+            elif archive.is_elapsed(a):
+                status = "Hora superada"
+            else:
+                status = "Pendiente"
+            row = [a.get("created_at", a.get("archived_at", ""))[:16].replace("T", " "),
+                   fmt_date(last), a["time"],
+                   _schedule_equipment_text(a), _schedule_label(a), REPEATS[a["repeat"]], fmt_date(a["start_date"]),
+                   fmt_date(a.get("until")), status, a.get("notes", "")]
+            if _matches(self.filter.get(), [*row, *_schedule_search_values(a)]):
                 self.rows.append(row)
-                self.tree.insert("", "end", iid=a["id"], values=row)
-        self.summary.config(text=f"{len(self.rows)} de {len(items)} programaciones finalizadas. "
-                                 "Se archivan solas al terminar y dejan de verse en Programaciones y Calendario.")
+                self.tree.insert("", "end", iid=("archivo:" if archived else "activa:") + a["id"], values=row)
+        self.summary.config(text=f"{len(self.rows)} de {len(items)} programaciones registradas.")
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
 
-    def delete(self):
-        item_id = _selected_id(self.tree)
-        if not item_id:
-            return messagebox.showinfo("Histórico", "Seleccione una programación del histórico.", parent=self)
-        if messagebox.askyesno("Eliminar", "¿Eliminar definitivamente esta programación del histórico?", parent=self):
-            store.archive.delete(item_id)
-            self.app.refresh_all()
-
     def export(self):
-        export_table(self, "Histórico de programaciones finalizadas", self.HEADERS, self.rows, "historico")
+        export_table(self, "Histórico de programaciones", self.HEADERS, self.rows, "historico")
 
 
 class StatsTab(ttk.Frame):
@@ -729,31 +799,10 @@ class StatsTab(ttk.Frame):
         super().__init__(parent, padding=8)
         self.d0 = date.today()
         self.d1 = date.today() + timedelta(days=30)
-        self.gmap: dict[str, str] = {}
-        self.gdata = self.cdata = None
+        self.cdata = None
 
-        gf = ttk.LabelFrame(self, text="Global: equipos que se apagan y excluidos", padding=6)
-        gf.pack(fill="both", expand=True)
-        bar = ttk.Frame(gf)
-        bar.pack(fill="x", pady=(0, 6))
-        ttk.Label(bar, text="Programación global:").pack(side="left")
-        self.gsel = tk.StringVar()
-        self.gcombo = ttk.Combobox(bar, textvariable=self.gsel, state="readonly", width=36)
-        self.gcombo.pack(side="left", padx=4)
-        self.gcombo.bind("<<ComboboxSelected>>", lambda e: self.refresh_global())
-        self.gsummary = ttk.Label(bar, font=("Segoe UI", 9, "bold"))
-        self.gsummary.pack(side="left", padx=12)
-        ttk.Button(bar, text="Exportar PDF/XLSX...",
-                   command=lambda: self._export(self.gdata, "estadisticas_global")).pack(side="left")
-        self.gfilter = tk.StringVar()
-        self.gfilter.trace_add("write", lambda *_: self.refresh_global())
-        _search_box(bar, self.gfilter)
-        self.gtree = _make_tree(gf, {"IP": 130, "Asignación": 260, "Estado": 120})
-        self.gtree.tag_configure("off", foreground="#2e9e5b")
-        self.gtree.tag_configure("excl", foreground="#e5534b")
-
-        cf = ttk.LabelFrame(self, text="Calendario: equipos que se apagan", padding=6)
-        cf.pack(fill="both", expand=True, pady=(8, 0))
+        cf = ttk.LabelFrame(self, text="Calendario: equipos programados", padding=6)
+        cf.pack(fill="both", expand=True)
         bar = ttk.Frame(cf)
         bar.pack(fill="x", pady=(0, 6))
         self.start = tk.StringVar(value=fmt_date(self.d0))
@@ -784,46 +833,14 @@ class StatsTab(ttk.Frame):
         self.d0, self.d1 = d0, d1
         self.refresh_calendar()
 
-    def refresh_global(self):
-        globs = store.globals_.all()
-        labels, ids = [], []
-        for g in globs:
-            label = f"{g['name']} ({g['time']}, {REPEATS[g['repeat']]})"
-            while label in labels:
-                label += "'"
-            labels.append(label)
-            ids.append(g["id"])
-        self.gmap = dict(zip(labels, ids))
-        self.gcombo["values"] = labels
-        if self.gsel.get() not in self.gmap:
-            self.gsel.set(labels[0] if labels else "")
-        self.gtree.delete(*self.gtree.get_children())
-        g = next((g for g in globs if g["id"] == self.gmap.get(self.gsel.get())), None)
-        if not g:
-            self.gdata = None
-            self.gsummary.config(text="No hay programaciones globales")
-            return
-        excluded = set(g.get("excluded_ips", []))
-        assignments = store.load_assignments()
-        off = sum(a["ip"] not in excluded for a in assignments)
-        summary = (f"Total: {len(assignments)} | Se apagan: {off} | "
-                   f"Excluidos: {len(assignments) - off}")
-        self.gsummary.config(text=summary)
-        rows = [(a["ip"], a.get("label", ""), "Excluido" if a["ip"] in excluded else "Se apaga")
-                for a in assignments]
-        rows = [r for r in rows if _matches(self.gfilter.get(), r)]
-        for r in rows:
-            self.gtree.insert("", "end", values=r, tags=("excl" if r[2] == "Excluido" else "off",))
-        self.gdata = (f"Estadísticas Global: {self.gsel.get()} - {summary}",
-                      ["IP", "Asignación", "Estado"], [list(r) for r in rows])
-
     def refresh_calendar(self):
         assign = {a["ip"]: a.get("label", "") for a in store.load_assignments()}
         active = [s for s in store.schedules.all() + archive.as_schedules() if s.get("enabled", True)]
-        rows = [(s["ip"], assign.get(s["ip"]) or s.get("label", ""), fmt_date(d), s["time"],
+        rows = [(ip, assign.get(ip) or s.get("label", ""), fmt_date(d), s["time"],
                  REPEATS[s["repeat"]])
-                for d, items in sorted(in_range(active, self.d0, self.d1).items()) for s in items]
-        summary = (f"{len(rows)} apagados programados | "
+                for d, items in sorted(in_range(active, self.d0, self.d1).items()) for s in items
+                for ip in included_ips(s)]
+        summary = (f"{len(rows)} equipos programados | "
                    f"{len({r[0] for r in rows})} equipos distintos")
         self.csummary.config(text=summary)
         self.ctree.delete(*self.ctree.get_children())
@@ -839,7 +856,6 @@ class StatsTab(ttk.Frame):
         export_table(self, *data, name)
 
     def refresh(self):
-        self.refresh_global()
         self.refresh_calendar()
 
 
@@ -866,7 +882,7 @@ class BackupTab(ttk.Frame):
         self.folder.pack(anchor="w")
         ttk.Checkbutton(self, text="Incluir historial de ejecuciones en el backup",
                         variable=self.history).pack(anchor="w")
-        ttk.Label(self, text="El backup (.zip) contiene la configuración, las programaciones y las globales. "
+        ttk.Label(self, text="El backup (.zip) contiene la configuración y las programaciones. "
                              "Al restaurar se reemplazan los datos actuales y antes se guarda una copia "
                              "automática (pre_restore_*).", foreground="gray", wraplength=900).pack(anchor="w", pady=4)
         self.tree = _make_tree(self, {"Fichero": 420, "Fecha": 150, "Tamaño": 90})
@@ -916,8 +932,7 @@ class BackupTab(ttk.Frame):
         except OSError as exc:
             return messagebox.showerror("Backup", f"No se pudo crear el backup:\n{exc}", parent=self)
         self.refresh()
-        messagebox.showinfo("Backup", f"Backup creado: {counts['schedules']} programaciones y "
-                                      f"{counts['global']} globales.\n{path}", parent=self)
+        messagebox.showinfo("Backup", f"Backup creado: {counts['schedules']} programaciones.\n{path}", parent=self)
 
     def restore_selected(self):
         path = _selected_id(self.tree)
@@ -948,8 +963,8 @@ class BackupTab(ttk.Frame):
         except (ValueError, OSError) as exc:
             return messagebox.showerror("Backup", f"No se pudo restaurar:\n{exc}", parent=self)
         app.reload_settings()
-        messagebox.showinfo("Backup", f"Restauración completada: {result['schedules']} programaciones y "
-                                      f"{result['global']} globales.", parent=app)
+        messagebox.showinfo("Backup", f"Restauración completada: {result['schedules']} programaciones.",
+                            parent=app)
 
     def delete(self):
         path = _selected_id(self.tree)
@@ -975,10 +990,9 @@ class ReportsTab(ttk.Frame):
         form = ttk.Frame(self)
         form.pack(fill="x")
         rows = (("Ámbito:", ttk.Combobox(form, textvariable=self.scope, state="readonly",
-                                         values=["Programaciones", "Global"])),
+                                         values=["Programaciones"])),
                 ("Periodo:", ttk.Combobox(form, textvariable=self.period, state="readonly",
-                                          values=["Diario", "Mensual", "Anual", "Rango de fechas",
-                                                  "Definiciones (solo Global)"])),
+                                          values=["Diario", "Mensual", "Anual", "Rango de fechas"])),
                 ("Fecha de referencia / desde:", DatePicker(form, self.ref)),
                 ("Hasta (solo rango):", DatePicker(form, self.end)),
                 ("Formato:", ttk.Combobox(form, textvariable=self.fmt, state="readonly",
@@ -997,12 +1011,9 @@ class ReportsTab(ttk.Frame):
         self.holder.pack(fill="both", expand=True, pady=(6, 0))
 
     def _build(self):
-        scope = "global" if self.scope.get() == "Global" else "schedules"
+        scope = "schedules"
         period = {"Diario": "day", "Mensual": "month", "Anual": "year",
-                  "Rango de fechas": "range"}.get(self.period.get(), "all")
-        if period == "all" and scope != "global":
-            messagebox.showerror("Informe", "Las definiciones solo aplican al ámbito Global.", parent=self)
-            return None
+                  "Rango de fechas": "range"}[self.period.get()]
         try:
             ref = parse_user_date(self.ref.get())
             end = parse_user_date(self.end.get()) if period == "range" else None
@@ -1061,11 +1072,16 @@ class LogTab(ttk.Frame):
         super().__init__(parent, padding=8)
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=(0, 6))
-        ttk.Button(bar, text="Actualizar", command=self.refresh).pack(side="left")
-        ttk.Button(bar, text="Abrir carpeta de logs", command=lambda: os.startfile(paths.LOG_DIR)).pack(side="left", padx=4)
+        ttk.Button(bar, text="Actualizar", command=app.refresh_and_cleanup).pack(side="left")
+        ttk.Button(bar, text="Abrir carpeta de logs", command=self.open_folder).pack(side="left", padx=4)
+        ttk.Label(self, text=str(paths.CALENDAR_LOG_DIR)).pack(anchor="w")
         self.filter = tk.StringVar()
-        self.filter.trace_add("write", lambda *_: self.refresh())
+        self.filter.trace_add("write", lambda *_: self.show_file())
         _search_box(bar, self.filter)
+        self.files = _make_tree(self, {"Archivo": 250})
+        self.files.master.pack_configure(fill="x", expand=False)
+        self.files.configure(height=6)
+        self.files.bind("<<TreeviewSelect>>", lambda _: self.show_file())
         p = theme.pal()
         self.text = tk.Text(self, wrap="none", state="disabled", font=("Consolas", 9), bg=p["field"],
                             fg=p["fg"], insertbackground=p["fg"], highlightthickness=0, borderwidth=0)
@@ -1074,53 +1090,89 @@ class LogTab(ttk.Frame):
         sb.pack(side="right", fill="y")
         self.text.pack(fill="both", expand=True)
 
-    def refresh(self):
-        lines: list[str] = []
+    def open_folder(self):
         try:
-            for f in reversed(store.log_files()):
-                lines = f.read_text(encoding="utf-8", errors="replace").splitlines() + lines
-                if len(lines) >= 5000:
-                    break
-        except OSError:
-            pass
-        lines = [l for l in lines if _matches(self.filter.get(), [l])][-1000:]
+            os.startfile(paths.CALENDAR_LOG_DIR)
+        except OSError as exc:
+            store.log.error("No se pudo abrir la carpeta de logs del calendario: %s", exc)
+            messagebox.showerror("Logs", f"No se pudo abrir la carpeta:\n{exc}", parent=self)
+
+    def _show_text(self, text: str):
         self.text.config(state="normal")
         self.text.delete("1.0", "end")
-        self.text.insert("end", "\n".join(lines))
-        self.text.see("end")
+        self.text.insert("end", text)
         self.text.config(state="disabled")
+
+    def refresh(self):
+        selected = _selected_id(self.files)
+        try:
+            files = sorted((p for p in paths.CALENDAR_LOG_DIR.iterdir() if p.is_file()),
+                           key=lambda p: p.name.casefold(), reverse=True)
+        except FileNotFoundError:
+            files = []
+            error = f"La carpeta de logs no existe: {paths.CALENDAR_LOG_DIR}"
+        except OSError as exc:
+            files = []
+            error = f"No se pudieron leer los logs: {exc}"
+            store.log.error(error)
+        else:
+            error = ""
+        self.files.delete(*self.files.get_children())
+        for path in files:
+            self.files.insert("", "end", iid=str(path), values=(path.name,))
+        if selected and self.files.exists(selected):
+            self.files.selection_set(selected)
+        elif files:
+            self.files.selection_set(str(files[0]))
+        if error:
+            self._show_text(error)
+        elif not files:
+            self._show_text("No hay archivos de logs.")
+        else:
+            self.show_file()
+
+    def show_file(self):
+        selected = _selected_id(self.files)
+        if not selected:
+            return
+        try:
+            text = Path(selected).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            store.log.error("No se pudo leer el log %s: %s", selected, exc)
+            self._show_text(f"No se pudo leer el archivo:\n{exc}")
+            return
+        lines = [line for line in text.splitlines() if _matches(self.filter.get(), [line])]
+        self._show_text("\n".join(lines))
 
 
 ABOUT_TEXT = f"""PowerPulse v{__version__}
 
-PowerPulse es una aplicación para Windows 11 que programa y gestiona el apagado de equipos de la red local (LAN).
+PowerPulse es una aplicación para Windows 11 que gestiona programaciones y genera archivos diarios de equipos de la red local (LAN).
 
 ORIGEN DE LOS EQUIPOS
 Las IPs de los equipos y sus asignaciones (usuarios) se leen, en modo solo lectura, del fichero assignments.json de MapPulse. Todas las programaciones se guardan en los ficheros propios de PowerPulse.
 
 PROGRAMACIONES
-Panel CRUD para crear, ver, editar, borrar y actualizar programaciones por equipo. Cada una puede ser única, diaria, semanal (con días a elegir), mensual o un rango de días (desde/hasta), con fecha final opcional. Al crear se pueden elegir varios equipos a la vez.
+Cada programación puede dirigirse a un equipo individual o a todos los equipos de MapPulse con exclusiones. La opción de todos incluye automáticamente los nuevos equipos cuando PowerPulse está abierto y detecta cambios; con la aplicación cerrada se actualiza al volver a abrirla. Los informes de programaciones activas reflejan los equipos actuales, no un registro histórico de cambios en MapPulse. Las programaciones pueden ser únicas, diarias, semanales, mensuales o un rango de días.
+Se puede añadir una etiqueta personalizada opcional a cada programación; no modifica la asignación del equipo en MapPulse ni el contenido de los TXT.
 
 CALENDARIO
 Vista diaria, mensual y anual de toda la programación. Al seleccionar un día se muestran sus programaciones y se pueden crear, editar o borrar desde ahí.
 
-GLOBAL
-Apagados para todos los equipos con posibilidad de excluir los que se indiquen. Tiene su propio fichero JSON y su propio CRUD, y es independiente del calendario.
-
 HISTÓRICO
-Las programaciones del calendario que han finalizado por completo (fecha pasada y sin repeticiones pendientes) se archivan automáticamente en el histórico y dejan de aparecer en Programaciones y Calendario. Siguen contando en informes y estadísticas de fechas pasadas, y se incluyen en los backups.
+Muestra todas las programaciones registradas, incluidas las pendientes y las eliminadas manualmente. Al iniciar o actualizar, las series cuya última fecha y hora han pasado se archivan y siguen incluidas en los backups. Esto no confirma que se hayan ejecutado.
 
 ESTADÍSTICAS
-Equipos que se apagan y excluidos en cada programación global, y equipos que se apagan según el calendario (IP, asignación y fecha) en el rango elegido.
+Equipos indicados por el calendario (IP, asignación y fecha) en el rango elegido.
 
 BACKUP
-Copia de la configuración, las programaciones y las globales en un .zip, y su posterior restauración. Antes de restaurar se guarda una copia automática del estado actual.
+Copia de la configuración y las programaciones en un .zip, y su posterior restauración. Antes de restaurar se guarda una copia automática del estado actual.
 
 INFORMES Y LOGS
-Informes en XLSX y PDF de las programaciones y de las globales, en periodo diario, mensual o anual. La aplicación genera logs automáticamente (altas, cambios, apagados e informes).
+Informes en XLSX y PDF de las programaciones, en periodo diario, mensual o anual. Logs permite consultar los archivos de {paths.CALENDAR_LOG_DIR}. El log indica que el proceso externo registró el día, no que todos los apagados se hayan realizado correctamente.
 
-EJECUCIÓN
-Mientras la aplicación esté abierta, un planificador ejecuta los apagados a su hora con 'shutdown /s /m'. Con la opción Archivo > 'Apagar también con PowerPulse cerrado' se crea una tarea de Windows que lo hace cada minuto aunque la aplicación esté cerrada (requiere sesión de usuario iniciada). El modo simulación (menú Archivo) registra la ejecución sin apagar ningún equipo. Para apagar equipos remotos se requieren permisos de administrador sobre ellos.
+ARCHIVOS PARA EL CALENDARIO EXTERNO
+Programaciones genera archivos diarios con el nombre YYYY-MM-DD.txt en {schedule_txt.OUTPUT_DIR}. Cada línea contiene un equipo seleccionado con el prefijo UNC (\\\\IP). Se incluyen solo programaciones activas; las repeticiones con fecha final se generan hasta esa fecha y las indefinidas, a 365 días vista. Al iniciar o actualizar se eliminan los TXT generados para fechas pasadas y se conservan en el TXT de hoy solo los equipos con horarios pendientes, sin exigir un log. PowerPulse solo crea estos archivos: no ejecuta apagados ni el .bat externo.
 
 BUSCADOR
 Las pestañas con listas disponen de un buscador que filtra por cualquier texto visible.
@@ -1166,16 +1218,24 @@ class App(tk.Tk):
         store.log.info("PowerPulse iniciado")
         self.settings = store.load_settings()
         theme.apply(self, self.settings["theme"])
+        ok, detail = background.uninstall()
+        if not ok:
+            store.log.error("No se pudieron eliminar las tareas de apagado anteriores: %s", detail)
+            messagebox.showerror(
+                "Tareas anteriores",
+                f"No se pudieron eliminar las tareas de apagado anteriores:\n{detail}",
+                parent=self)
+            self.destroy()
+            raise RuntimeError("No se pudieron eliminar las tareas de apagado anteriores.")
 
         self.menubar = ttk.Frame(self)
         self.menubar.pack(side="top", fill="x")
-        self.dry = tk.BooleanVar(value=self.settings["dry_run"])
         self.theme_var = tk.StringVar(value=self.settings["theme"])
         self.top_var = tk.BooleanVar(value=self.settings["always_on_top"])
         self.backup_view: Path | None = None
-        self.bg_var = tk.BooleanVar(value=False)
-        self._bg_state: bool | None = None
-        threading.Thread(target=self._check_background, daemon=True).start()
+        self._txt_count = 0
+        self._txt_generation_date = date.today()
+        self._txt_assignments_signature = None
         self.attributes("-topmost", self.top_var.get())
         self.build_menu()
 
@@ -1185,9 +1245,7 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True)
         self.build_tabs()
         self.nb.bind("<<NotebookTabChanged>>", self._tab_changed)
-        self.refresh_all()
-        self.scheduler = Scheduler()
-        self.scheduler.start()
+        self.refresh_and_cleanup()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(15000, self.auto_refresh)
         self.update()
@@ -1201,16 +1259,11 @@ class App(tk.Tk):
         opts = dict(tearoff=False, bg=p["field"], fg=p["fg"], activebackground=p["sel"],
                     activeforeground=p["selfg"], selectcolor=p["fg"], borderwidth=0)
         menu = tk.Menu(mb, **opts)
-        menu.add_checkbutton(label="Modo simulación (no apaga equipos)", variable=self.dry,
-                             command=self.toggle_dry)
-        menu.add_command(label="Retardo de apagado...", command=self.set_delay)
         menu.add_command(label="Abrir carpeta de datos", command=lambda: os.startfile(paths.DATA_DIR))
         menu.add_command(label="Carpeta de backups por defecto...", command=self.choose_backup_folder)
         menu.add_command(label="Restablecer carpeta de backups (Copia)", command=self.reset_backup_folder)
         menu.add_checkbutton(label="Mantener ventana en primer plano", variable=self.top_var,
                              command=self.toggle_top)
-        menu.add_checkbutton(label="Apagar también con PowerPulse cerrado (tarea de Windows)",
-                             variable=self.bg_var, command=self.toggle_background)
         theme_menu = tk.Menu(menu, **opts)
         for label, value in (("Claro", theme.LIGHT), ("Oscuro", theme.DARK)):
             theme_menu.add_radiobutton(label=label, value=value, variable=self.theme_var,
@@ -1226,20 +1279,6 @@ class App(tk.Tk):
             tab = self.tabs.get(self.nb.tab(self.nb.select(), "text"))
             if tab:
                 tab.refresh()
-
-    def _check_background(self):
-        self._bg_state = background.is_installed()
-
-    def toggle_background(self):
-        want = self.bg_var.get()
-        ok, msg = background.install() if want else background.uninstall()
-        if ok:
-            store.log.info("Tarea en segundo plano %s", "activada" if want else "desactivada")
-        else:
-            self.bg_var.set(not want)
-            messagebox.showerror("Segundo plano", f"No se pudo {'activar' if want else 'desactivar'} "
-                                                  f"la tarea de Windows:\n{msg}", parent=self)
-        self.update_status()
 
     def toggle_top(self):
         self.settings["always_on_top"] = self.top_var.get()
@@ -1263,13 +1302,13 @@ class App(tk.Tk):
 
     def reload_settings(self):
         self.settings = store.load_settings()
-        self.dry.set(self.settings["dry_run"])
         self.top_var.set(self.settings["always_on_top"])
         self.attributes("-topmost", self.top_var.get())
         self.theme_var.set(self.settings["theme"])
         theme.apply(self, self.settings["theme"])
         self.build_menu()
         self.build_tabs()
+        self.generate_schedule_txts(self, notify=False)
         self.refresh_all()
 
     def set_theme(self):
@@ -1286,7 +1325,7 @@ class App(tk.Tk):
             self.nb.nametowidget(t).destroy()
         self.tabs = {}
         for name, cls in (("Programaciones", ScheduleTab), ("Calendario", CalendarTab),
-                          ("Global", GlobalTab), ("Histórico", ArchiveTab), ("Estadísticas", StatsTab),
+                          ("Histórico", ArchiveTab), ("Estadísticas", StatsTab),
                           ("Informes", ReportsTab),
                           ("Backup", BackupTab), ("Logs", LogTab),
                           ("About", AboutTab)):
@@ -1295,41 +1334,65 @@ class App(tk.Tk):
             self.tabs[name] = tab
         self.nb.select(current)
 
-    def toggle_dry(self):
-        self.settings["dry_run"] = self.dry.get()
-        store.save_settings(self.settings)
-        self.update_status()
-
-    def set_delay(self):
-        v = messagebox.askinteger("Retardo", "Segundos de aviso antes de apagar (0-600):",
-                                  initialvalue=self.settings["delay_seconds"],
-                                  minvalue=0, maxvalue=600, parent=self)
-        if v is not None:
-            self.settings["delay_seconds"] = v
-            store.save_settings(self.settings)
-            self.update_status()
-
     def update_status(self):
-        if self._bg_state is not None:
-            self.bg_var.set(self._bg_state)
-            self._bg_state = None
-        mode = "SIMULACIÓN (no se apaga ningún equipo)" if self.settings["dry_run"] else "REAL (los equipos se apagarán)"
-        bg = "ACTIVO" if self.bg_var.get() else "inactivo"
-        self.status.set(f" Modo: {mode} | Segundo plano: {bg} | Retardo: {self.settings['delay_seconds']} s | "
+        self.status.set(f" TXT generados: {self._txt_count} | Carpeta: {schedule_txt.OUTPUT_DIR} | "
                         f"Equipos MapPulse: {len(store.load_assignments())}")
 
+    def generate_schedule_txts(self, parent, notify: bool = False, *,
+                               now: datetime | None = None, cleanup_elapsed: bool = False):
+        signature = self._assignments_signature()
+        try:
+            self._txt_count = schedule_txt.generate(now=now, cleanup_elapsed=cleanup_elapsed)
+        except (OSError, ValueError, KeyError) as exc:
+            self._txt_assignments_signature = signature
+            store.log.exception("No se pudieron generar los TXT diarios")
+            messagebox.showerror("Generar TXT", f"No se pudieron generar los archivos:\n{exc}", parent=parent)
+            return False
+        self._txt_generation_date = date.today()
+        self._txt_assignments_signature = signature
+        store.log.info("Generación de TXT finalizada: %d archivo(s)", self._txt_count)
+        self.update_status()
+        if notify:
+            messagebox.showinfo("Generar TXT",
+                                f"Se generaron {self._txt_count} archivo(s) en:\n{schedule_txt.OUTPUT_DIR}",
+                                parent=parent)
+        return True
+
     def refresh_all(self):
-        archive.archive_finished()
         self.update_status()
         for tab in self.tabs.values():
             tab.refresh()
 
+    def refresh_and_cleanup(self):
+        now = datetime.now()
+        if not self.generate_schedule_txts(self, notify=False, now=now, cleanup_elapsed=True):
+            self.refresh_all()
+            return
+        try:
+            archive.archive_finished(now)
+        except (OSError, ValueError, KeyError) as exc:
+            store.log.exception("No se pudieron archivar las programaciones")
+            messagebox.showerror("Actualizar", f"No se pudieron archivar las programaciones:\n{exc}", parent=self)
+        self.refresh_all()
+
+    @staticmethod
+    def _assignments_signature():
+        if not any(s.get("enabled", True) and s.get("target_mode") == "all"
+                   for s in store.schedules.all()):
+            return None
+        try:
+            return hashlib.sha256(paths.ASSIGNMENTS_FILE.read_bytes()).hexdigest()
+        except OSError as exc:
+            return f"error:{exc}"
+
     def auto_refresh(self):
         self.refresh_all()
+        if (date.today() != self._txt_generation_date or
+                self._assignments_signature() != self._txt_assignments_signature):
+            self.generate_schedule_txts(self, notify=False)
         self.after(15000, self.auto_refresh)
 
     def on_close(self):
-        self.scheduler.stop()
         store.log.info("PowerPulse cerrado")
         self.destroy()
 

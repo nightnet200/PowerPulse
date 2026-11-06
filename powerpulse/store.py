@@ -122,8 +122,7 @@ globals_ = JsonStore(paths.GLOBAL_FILE, "GLOBAL")
 history = HistoryStore(paths.HISTORY_FILE, "HISTORIAL")
 archive = JsonStore(paths.ARCHIVE_FILE, "HISTORICO")
 
-DEFAULT_SETTINGS = {"dry_run": True, "delay_seconds": 60, "grace_minutes": 15, "theme": "light",
-                    "backup_dir": "", "always_on_top": True}
+DEFAULT_SETTINGS = {"theme": "light", "backup_dir": "", "always_on_top": True}
 
 
 def load_settings() -> dict:
@@ -139,8 +138,27 @@ def save_settings(settings: dict) -> None:
 def load_assignments() -> list[dict]:
     """Equipos y usuarios de MapPulse (solo lectura)."""
     data = _read(paths.ASSIGNMENTS_FILE, [])
+    if not isinstance(data, list) or not all(isinstance(a, dict) for a in data):
+        log.error("El archivo de equipos de MapPulse no tiene un formato válido: %s", paths.ASSIGNMENTS_FILE)
+        return []
+    if not all(not a.get("ip") or isinstance(a["ip"], str) for a in data):
+        log.error("El archivo de equipos de MapPulse contiene una IP no válida: %s", paths.ASSIGNMENTS_FILE)
+        return []
     items = [a for a in data if a.get("ip")]
     return sorted(items, key=lambda a: tuple(int(p) if p.isdigit() else 0 for p in a["ip"].split(".")))
+
+
+def load_assignments_strict() -> list[dict]:
+    """Lee MapPulse sin convertir errores de lectura en una lista vacía."""
+    try:
+        data = json.loads(paths.ASSIGNMENTS_FILE.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"No se pudieron leer los equipos de MapPulse: {exc}") from exc
+    if not isinstance(data, list) or not all(isinstance(a, dict) for a in data):
+        raise ValueError("El archivo de equipos de MapPulse no tiene un formato válido.")
+    if not all(not a.get("ip") or isinstance(a["ip"], str) for a in data):
+        raise ValueError("El archivo de equipos de MapPulse contiene una IP no válida.")
+    return [a for a in data if a.get("ip")]
 
 
 def equipment_text(a: dict) -> str:

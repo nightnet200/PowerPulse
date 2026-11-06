@@ -31,8 +31,10 @@ def make_shortcut(link: Path, target: Path, icon: Path) -> None:
     subprocess.run(["powershell", "-NoProfile", "-Command", ps], check=True, creationflags=NO_WINDOW)
 
 
-def install(dest: Path, desktop: bool, task: bool) -> Path:
-    background.uninstall()  # libera PowerPulse.exe si la tarea lo estuviera usando
+def install(dest: Path, desktop: bool) -> Path:
+    ok, msg = background.uninstall()
+    if not ok:
+        raise OSError(f"No se pudieron eliminar las tareas anteriores:\n{msg}")
     dest.mkdir(parents=True, exist_ok=True)
     exe = dest / f"{APP}.exe"
     shutil.copy2(BUNDLE / f"{APP}.exe", exe)
@@ -43,10 +45,6 @@ def install(dest: Path, desktop: bool, task: bool) -> Path:
     make_shortcut(START_MENU / f"{APP}.lnk", exe, dest / "icon.ico")
     if desktop:
         make_shortcut(DESKTOP / f"{APP}.lnk", exe, dest / "icon.ico")
-    if task:
-        ok, msg = background.install(exe)
-        if not ok:
-            raise OSError(f"No se pudo crear la tarea programada:\n{msg}")
 
     size_kb = sum(f.stat().st_size for f in dest.iterdir()) // 1024
     with winreg.CreateKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as k:
@@ -71,7 +69,11 @@ def uninstall() -> None:
     dest = Path(sys.executable).parent
     for link in (START_MENU / f"{APP}.lnk", DESKTOP / f"{APP}.lnk"):
         link.unlink(missing_ok=True)
-    background.uninstall()
+    ok, detail = background.uninstall()
+    if not ok:
+        messagebox.showerror(APP, f"No se pudieron eliminar las tareas anteriores:\n{detail}", parent=root)
+        root.destroy()
+        return
     try:
         winreg.DeleteKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY)
     except OSError:
@@ -96,7 +98,7 @@ class Wizard(tk.Tk):
         f = ttk.Frame(self, padding=16)
         f.pack()
         ttk.Label(f, text=f"{APP} {VERSION}", font=("Segoe UI", 16, "bold")).grid(sticky="w")
-        ttk.Label(f, text="Programación y gestión del apagado de equipos en la LAN.").grid(sticky="w", pady=(0, 10))
+        ttk.Label(f, text="Programación y generación de archivos de equipos de la LAN.").grid(sticky="w", pady=(0, 10))
         ttk.Label(f, text="Carpeta de instalación:").grid(sticky="w")
         self.path = tk.StringVar(value=str(LOCAL / "Programs" / APP))
         row = ttk.Frame(f)
@@ -105,11 +107,8 @@ class Wizard(tk.Tk):
         ttk.Button(row, text="Examinar...", command=self.browse).pack(side="left", padx=4)
         self.desktop = tk.BooleanVar(value=True)
         self.launch = tk.BooleanVar(value=True)
-        self.task = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="Crear acceso directo en el escritorio", variable=self.desktop).grid(sticky="w", pady=(10, 0))
-        ttk.Checkbutton(f, text="Apagar equipos programados aunque PowerPulse esté cerrado (tarea de Windows)",
-                        variable=self.task).grid(sticky="w")
-        ttk.Checkbutton(f, text="Ejecutar PowerPulse al terminar", variable=self.launch).grid(sticky="w")
+        ttk.Checkbutton(f, text="Ejecutar PowerPulse al terminar (genera los TXT)", variable=self.launch).grid(sticky="w")
         bar = ttk.Frame(f)
         bar.grid(sticky="e", pady=(14, 0))
         ttk.Button(bar, text="Instalar", command=self.run).pack(side="left", padx=4)
@@ -122,7 +121,7 @@ class Wizard(tk.Tk):
 
     def run(self):
         try:
-            exe = install(Path(self.path.get()), self.desktop.get(), self.task.get())
+            exe = install(Path(self.path.get()), self.desktop.get())
         except (OSError, subprocess.CalledProcessError) as exc:
             messagebox.showerror(APP, f"No se pudo instalar:\n{exc}", parent=self)
             return

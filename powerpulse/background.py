@@ -1,53 +1,30 @@
-"""Tarea programada de Windows que ejecuta el planificador aunque PowerPulse esté cerrado."""
+"""Limpieza de tareas de apagado creadas por versiones anteriores de PowerPulse."""
 import subprocess
-import sys
-from pathlib import Path
 
 TASK_NAME = "PowerPulse-Scheduler"
+_TASK_DESCRIPTION_PREFIX = "PowerPulse Global:"
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
-def _quote(text: str) -> str:
-    return text.replace("'", "''")
-
-
-def _command(exe: str | Path | None) -> tuple[str, str]:
-    if exe:
-        return str(exe), "--tick"
-    if getattr(sys, "frozen", False):
-        return sys.executable, "--tick"
-    pyw = Path(sys.executable).with_name("pythonw.exe")
-    run = Path(__file__).resolve().parent.parent / "run.py"
-    return str(pyw if pyw.exists() else sys.executable), f'"{run}" --tick'
-
-
-def _powershell(script: str) -> tuple[bool, str]:
+def uninstall() -> tuple[bool, str]:
+    """Elimina las tareas antiguas que podían enviar apagados remotos."""
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        f"$task = Get-ScheduledTask -TaskPath '\\' -TaskName '{TASK_NAME}' "
+        "-ErrorAction SilentlyContinue; "
+        "if ($task) { Unregister-ScheduledTask -TaskPath '\\' "
+        f"-TaskName '{TASK_NAME}' -Confirm:$false -ErrorAction Stop }}; "
+        "$tasks = @(Get-ScheduledTask -TaskPath '\\Global\\' "
+        "-ErrorAction SilentlyContinue | Where-Object { "
+        f"$_.TaskName -eq '{TASK_NAME}' -or $_.Description -like '{_TASK_DESCRIPTION_PREFIX}*' }}); "
+        "foreach ($task in $tasks) { Unregister-ScheduledTask -TaskPath $task.TaskPath "
+        "-TaskName $task.TaskName -Confirm:$false -ErrorAction Stop }")
     try:
-        r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                            "-Command", script], capture_output=True, timeout=60, creationflags=_NO_WINDOW)
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", script],
+            capture_output=True, timeout=60, creationflags=_NO_WINDOW)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, str(exc)
-    out = (r.stdout + r.stderr).decode("oem", errors="replace").strip()
-    return r.returncode == 0, out
-
-
-def is_installed() -> bool:
-    return _powershell(f"Get-ScheduledTask -TaskName '{TASK_NAME}' -ErrorAction Stop | Out-Null")[0]
-
-
-def install(exe: str | Path | None = None) -> tuple[bool, str]:
-    """Crea la tarea del usuario actual: se ejecuta cada minuto mientras tenga la sesión iniciada."""
-    program, args = _command(exe)
-    script = (
-        f"$a = New-ScheduledTaskAction -Execute '{_quote(program)}' -Argument '{_quote(args)}'; "
-        "$t = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) "
-        "-RepetitionDuration (New-TimeSpan -Days 3650); "
-        "$s = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
-        "-StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 30); "
-        f"Register-ScheduledTask -TaskName '{TASK_NAME}' -Action $a -Trigger $t -Settings $s "
-        "-Description 'Ejecuta los apagados programados de PowerPulse' -Force | Out-Null")
-    return _powershell(script)
-
-
-def uninstall() -> tuple[bool, str]:
-    return _powershell(f"Unregister-ScheduledTask -TaskName '{TASK_NAME}' -Confirm:$false -ErrorAction Stop")
+    output = (result.stdout + result.stderr).decode("oem", errors="replace").strip()
+    return result.returncode == 0, output

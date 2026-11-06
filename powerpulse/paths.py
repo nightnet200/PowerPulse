@@ -17,6 +17,7 @@ ARCHIVE_FILE = DATA_DIR / "historico.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LOG_DIR = DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "powerpulse.log"
+CALENDAR_LOG_DIR = Path(r"C:\ShutPCs\Calendario\logs")
 REPORTS_DIR = DATA_DIR / "Informes"
 LEGACY_REPORTS_DIR = DATA_DIR / "reports"
 
