@@ -68,15 +68,17 @@ def generate(today: date | None = None, *, now: datetime | None = None,
     for item in schedules:
         if not item.get("enabled", True):
             continue
-        start = max(today, date.fromisoformat(item["start_date"]))
+        initial_date = date.fromisoformat(item["start_date"])
+        start = max(today, initial_date)
         until = date.fromisoformat(item["until"]) if item.get("until") else None
         end = until or latest
         if start > end:
             continue
         ips = included_ips(item, assignments)
         for occurrence in dates_for(item, start, end):
-            if datetime.combine(
-                    occurrence, datetime.strptime(item["time"], "%H:%M").time()) < now:
+            occurrence_time = datetime.combine(
+                occurrence, datetime.strptime(item["time"], "%H:%M").time())
+            if occurrence_time < now and (cleanup_elapsed or occurrence != initial_date):
                 continue
             targets[occurrence].update(ips)
 

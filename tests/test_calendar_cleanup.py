@@ -114,6 +114,15 @@ class CalendarCleanupTests(unittest.TestCase):
         schedule_txt.generate(now=datetime(2026, 11, 6, 17, 0, 1), cleanup_elapsed=True)
         self.assertFalse(path.exists())
 
+    def test_initial_date_txt_is_generated_after_its_scheduled_time(self):
+        self.add_schedule("2026-11-06", "10.0.0.1")
+
+        schedule_txt.generate(now=datetime(2026, 11, 6, 18))
+
+        path = self.output / "2026-11-06.txt"
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_text().splitlines(), [r"\\10.0.0.1"])
+
     def test_refresh_invokes_cleanup_then_archives_with_same_time(self):
         elapsed = self.add_schedule("2026-11-06", "10.0.0.1")
         self.schedules.update(elapsed["id"], {"time": "10:00"})
