@@ -248,9 +248,12 @@ class TimePicker(ttk.Frame):
 class TimingForm(ttk.Frame):
     """Campos de fecha/hora/repetición para las programaciones del calendario."""
 
-    def __init__(self, parent, item: dict | None, default_date: date):
+    def __init__(self, parent, item: dict | None, default_date: date, *, date_only: bool = False,
+                 fixed_time: str = "17:00"):
         super().__init__(parent)
         item = item or {}
+        self.date_only = date_only
+        self.fixed_time = fixed_time
         self.date = tk.StringVar(value=fmt_date(item.get("start_date") or default_date))
         self.time = tk.StringVar(value=item.get("time", "08:00"))
         self.repeat = tk.StringVar(value=REPEATS[item.get("repeat", "none")])
@@ -259,8 +262,15 @@ class TimingForm(ttk.Frame):
         days = item.get("weekdays", [])
         self.wd = [tk.BooleanVar(value=i in days) for i in range(7)]
 
-        ttk.Label(self, text="Fecha / desde:").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Label(self, text="Fecha:" if date_only else "Fecha / desde:").grid(
+            row=0, column=0, sticky="w", pady=2)
         DatePicker(self, self.date, 14).grid(row=0, column=1, sticky="w")
+        if date_only:
+            ttk.Label(self, text="Hasta (opcional):").grid(row=1, column=0, sticky="w", pady=2)
+            DatePicker(self, self.until, 14, allow_empty=True).grid(row=1, column=1, sticky="w")
+            ttk.Checkbutton(self, text="Activa", variable=self.enabled).grid(
+                row=2, column=0, sticky="w")
+            return
         self.until_lbl = ttk.Label(self)
         self.until_lbl.grid(row=0, column=2, sticky="w", padx=(12, 0))
         DatePicker(self, self.until, 14, allow_empty=True).grid(row=0, column=3, sticky="w")
@@ -284,6 +294,13 @@ class TimingForm(ttk.Frame):
 
     def values(self) -> dict:
         start = parse_user_date(self.date.get())
+        if self.date_only:
+            until = parse_user_date(self.until.get()) if self.until.get().strip() else None
+            if until and until < start:
+                raise ValueError("'Hasta' no puede ser anterior a la fecha de inicio")
+            return {"start_date": start.isoformat(), "time": self.fixed_time, "repeat": "daily",
+                    "until": until.isoformat() if until else None,
+                    "weekdays": [], "enabled": self.enabled.get()}
         until = parse_user_date(self.until.get()) if self.until.get().strip() else None
         if until and until < start:
             raise ValueError("'Hasta' no puede ser anterior a la fecha de inicio")
@@ -303,6 +320,10 @@ class _Dialog(tk.Toplevel):
         self.transient(parent.winfo_toplevel())
         self.resizable(False, False)
         self.configure(bg=theme.pal()["bg"])
+        try:
+            self.iconbitmap(paths.ICON_FILE)
+        except tk.TclError:
+            pass
         self.result = None
         self.body = ttk.Frame(self, padding=10)
         self.body.pack(fill="both", expand=True)
@@ -327,7 +348,7 @@ class _Dialog(tk.Toplevel):
 
 
 class ScheduleDialog(_Dialog):
-    def __init__(self, parent, item: dict | None, default_date: date):
+    def __init__(self, parent, item: dict | None, default_date: date, *, fixed_time: str = "17:00"):
         super().__init__(parent, "Editar programación" if item else "Nueva programación")
         old_scope = scope_ips(item) if item else []
         if item and item.get("target_mode") == "all":
@@ -368,7 +389,8 @@ class ScheduleDialog(_Dialog):
         self.saved_summary = self._exclusions_bar(self.saved_frame) if initial_mode == "saved" else None
         self._update_exclusion_summary()
         self._show_mode()
-        self.timing = TimingForm(self.body, item, default_date)
+        self.timing = TimingForm(self.body, item, default_date, date_only=item is None,
+                                 fixed_time=fixed_time)
         self.timing.pack(fill="x", pady=8)
         ttk.Label(self.body, text="Etiqueta personalizada (opcional):").pack(anchor="w")
         self.label = tk.StringVar(value=(item or {}).get("schedule_label", ""))
@@ -464,21 +486,23 @@ def _crud_buttons(parent, app, new, edit, delete):
     return bar
 
 
-def schedule_new(app, parent, default_date: date):
-    dlg = ScheduleDialog(parent, None, default_date)
+def schedule_new(app, parent, default_date: date, profile: str = "5pm"):
+    fixed_time = "07:00" if profile == "7am" else "17:00"
+    dlg = ScheduleDialog(parent, None, default_date, fixed_time=fixed_time)
     parent.wait_window(dlg)
     if dlg.result:
         store.schedules.add({"target_mode": dlg.result["target_mode"], "ips": dlg.result["ips"],
                              "excluded_ips": dlg.result["excluded_ips"],
+                             "profile": profile,
                              "schedule_label": dlg.result["schedule_label"],
                              "notes": dlg.result["notes"], **dlg.result["timing"]})
-        app.generate_schedule_txts(parent)
+        app.generate_schedule_txts(parent, profile=profile)
         app.refresh_all()
 
 
-def schedule_edit(app, parent, item_id: str | None):
+def schedule_edit(app, parent, item_id: str | None, profile: str = "5pm"):
     item = item_id and store.schedules.get(item_id)
-    if not item:
+    if not item or item.get("profile", "5pm") != profile:
         messagebox.showinfo("PowerPulse", "Seleccione una programación.", parent=parent)
         return
     dlg = ScheduleDialog(parent, item, date.today())
@@ -492,13 +516,13 @@ def schedule_edit(app, parent, item_id: str | None):
                                          "ip": None, "label": legacy_label,
                                          "schedule_label": dlg.result["schedule_label"],
                                          "notes": dlg.result["notes"], **dlg.result["timing"]})
-        app.generate_schedule_txts(parent)
+        app.generate_schedule_txts(parent, profile=profile)
         app.refresh_all()
 
 
-def schedule_delete(app, parent, item_id: str | None):
+def schedule_delete(app, parent, item_id: str | None, profile: str = "5pm"):
     item = item_id and store.schedules.get(item_id)
-    if not item:
+    if not item or item.get("profile", "5pm") != profile:
         messagebox.showinfo("PowerPulse", "Seleccione una programación.", parent=parent)
         return
     extra = "\nSe eliminará toda la serie repetida." if item["repeat"] != "none" else ""
@@ -513,7 +537,7 @@ def schedule_delete(app, parent, item_id: str | None):
             store.log.exception("No se pudo conservar la programación eliminada en el histórico")
             messagebox.showerror("Borrar", f"No se pudo borrar la programación:\n{exc}", parent=parent)
             return
-        app.generate_schedule_txts(parent)
+        app.generate_schedule_txts(parent, profile=profile)
         app.refresh_all()
 
 
@@ -521,28 +545,37 @@ class ScheduleTab(ttk.Frame):
     COLS = {"Fecha": 90, "Hora": 60, "Equipos": 120, "Etiqueta": 180, "Repetición": 90,
             "Días": 140, "Hasta": 90, "Activa": 60, "Estado": 110, "Notas": 200}
 
-    def __init__(self, parent, app):
+    def __init__(self, parent, app, profile: str = "5pm"):
         super().__init__(parent, padding=8)
         self.app = app
-        bar = _crud_buttons(self, app, lambda: schedule_new(app, self, date.today()),
-                            lambda: schedule_edit(app, self, _selected_id(self.tree)),
-                            lambda: schedule_delete(app, self, _selected_id(self.tree)))
-        ttk.Button(bar, text="Generar TXT", command=lambda: app.generate_schedule_txts(self, notify=True)).pack(
+        self.profile = profile
+        self.fixed_time = "07:00" if profile == "7am" else "17:00"
+        self.output_dir = schedule_txt.OUTPUT_DIR_7AM if profile == "7am" else schedule_txt.OUTPUT_DIR
+        bar = _crud_buttons(self, app, lambda: schedule_new(app, self, date.today(), profile),
+                            lambda: schedule_edit(app, self, _selected_id(self.tree), profile),
+                            lambda: schedule_delete(app, self, _selected_id(self.tree), profile))
+        ttk.Button(bar, text="Generar TXT",
+                   command=lambda: app.generate_schedule_txts(self, notify=True, profile=profile)).pack(
             side="left", padx=4)
-        ttk.Label(self, text=f"Archivos diarios en: {schedule_txt.OUTPUT_DIR} "
+        ttk.Label(self, text=f"Archivos diarios a las {self.fixed_time} en: {self.output_dir} "
                              f"(365 días para repeticiones sin fecha final)").pack(anchor="w", pady=(0, 6))
         self.filter = tk.StringVar()
         self.filter.trace_add("write", lambda *_: self.refresh())
         _search_box(bar, self.filter)
         self.tree = _make_tree(self, self.COLS)
-        self.tree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.tree)))
+        tag = "schedule_7am" if profile == "7am" else "schedule_5pm"
+        self.tree.tag_configure(tag, foreground=theme.pal()[tag])
+        self.row_tag = tag
+        self.tree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.tree), profile))
 
     def refresh(self):
         sel = _selected_id(self.tree)
         self.tree.delete(*self.tree.get_children())
         hist = store.history.status_map()
         needle = self.filter.get()
-        for s in sorted(store.schedules.all(), key=lambda s: (s["start_date"], s["time"])):
+        schedules = (s for s in store.schedules.all()
+                     if s.get("profile", "5pm") == self.profile)
+        for s in sorted(schedules, key=lambda s: (s["start_date"], s["time"])):
             hits = [k.split("|")[1] for k in hist if k.startswith(s["id"])]
             status = hist[f"{s['id']}|{max(hits)}"]["status"] if hits else (
                 "Pendiente" if s.get("enabled", True) else "Desactivada")
@@ -551,7 +584,7 @@ class ScheduleTab(ttk.Frame):
                    "Sí" if s.get("enabled", True) else "No", status, s.get("notes", ""))
             if not _matches(needle, [*row, *_schedule_search_values(s)]):
                 continue
-            self.tree.insert("", "end", iid=s["id"], values=row)
+            self.tree.insert("", "end", iid=s["id"], values=row, tags=(self.row_tag,))
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
 
@@ -588,10 +621,14 @@ class CalendarTab(ttk.Frame):
         _search_box(bar, self.filter)
         self.tree = _make_tree(self.panel, {"Hora": 60, "Equipos": 120, "Etiqueta": 200,
                                             "Repetición": 90, "Estado": 110, "Notas": 250})
+        for tag in ("schedule_5pm", "schedule_7am"):
+            self.tree.tag_configure(tag, foreground=theme.pal()[tag])
         self.tree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.tree)))
         self.stree = _make_tree(self.panel, {"Fecha": 90, "Hora": 60, "Equipos": 110, "Etiqueta": 170,
                                              "Repetición": 90, "Desde": 90, "Hasta": 90, "Activa": 55,
                                              "Estado": 100, "Notas": 200})
+        for tag in ("schedule_5pm", "schedule_7am"):
+            self.stree.tag_configure(tag, foreground=theme.pal()[tag])
         self.stree.bind("<Double-1>", lambda e: schedule_edit(app, self, _selected_id(self.stree)))
         self.stree.master.pack_forget()
 
@@ -696,7 +733,8 @@ class CalendarTab(ttk.Frame):
         for s in items:
             self.tree.insert("", "end", iid=s["id"], values=(
                 s["time"], _schedule_equipment_text(s), _schedule_label(s), REPEATS[s["repeat"]],
-                status_for(s, self.sel, hist), s.get("notes", "")))
+                status_for(s, self.sel, hist), s.get("notes", "")),
+                tags=("schedule_7am" if s.get("profile") == "7am" else "schedule_5pm",))
 
     def _fill_search(self):
         needle = self.filter.get().strip()
@@ -714,9 +752,10 @@ class CalendarTab(ttk.Frame):
                    fmt_date(s["start_date"]), fmt_date(s.get("until")), "Sí" if s.get("enabled", True) else "No",
                    status_for(s, focus, hist), s.get("notes", ""))
             if _matches(needle, [*row, *_schedule_search_values(s)]) or (day and dates_for(s, day, day)):
-                found.append((focus, s["time"], s["id"], row))
-        for _, _, sid, row in sorted(found):
-            self.stree.insert("", "end", iid=sid, values=row)
+                tag = "schedule_7am" if s.get("profile") == "7am" else "schedule_5pm"
+                found.append((focus, s["time"], s["id"], row, tag))
+        for _, _, sid, row, tag in sorted(found):
+            self.stree.insert("", "end", iid=sid, values=row, tags=(tag,))
         self.panel.config(text=f"Búsqueda en todas las fechas: {len(found)} resultado(s). "
                                "La fecha es la próxima o, si ya pasó, la última.")
         if sel and self.stree.exists(sel):
@@ -1070,11 +1109,21 @@ class ReportsTab(ttk.Frame):
 class LogTab(ttk.Frame):
     def __init__(self, parent, app):
         super().__init__(parent, padding=8)
+        self.log_dir = tk.StringVar(value="5PM")
+        self.log_directories = {
+            "5PM": paths.CALENDAR_LOG_DIR,
+            "7AM": paths.CALENDAR_7AM_LOG_DIR,
+        }
         bar = ttk.Frame(self)
         bar.pack(fill="x", pady=(0, 6))
         ttk.Button(bar, text="Actualizar", command=app.refresh_and_cleanup).pack(side="left")
         ttk.Button(bar, text="Abrir carpeta de logs", command=self.open_folder).pack(side="left", padx=4)
-        ttk.Label(self, text=str(paths.CALENDAR_LOG_DIR)).pack(anchor="w")
+        ttk.Label(bar, text="Programación:").pack(side="left", padx=(12, 4))
+        ttk.Combobox(bar, textvariable=self.log_dir, values=list(self.log_directories),
+                     state="readonly", width=8).pack(side="left")
+        self.log_path = ttk.Label(self)
+        self.log_path.pack(anchor="w")
+        self.log_dir.trace_add("write", lambda *_: self.refresh())
         self.filter = tk.StringVar()
         self.filter.trace_add("write", lambda *_: self.show_file())
         _search_box(bar, self.filter)
@@ -1091,8 +1140,9 @@ class LogTab(ttk.Frame):
         self.text.pack(fill="both", expand=True)
 
     def open_folder(self):
+        log_dir = self.log_directories[self.log_dir.get()]
         try:
-            os.startfile(paths.CALENDAR_LOG_DIR)
+            os.startfile(log_dir)
         except OSError as exc:
             store.log.error("No se pudo abrir la carpeta de logs del calendario: %s", exc)
             messagebox.showerror("Logs", f"No se pudo abrir la carpeta:\n{exc}", parent=self)
@@ -1104,13 +1154,15 @@ class LogTab(ttk.Frame):
         self.text.config(state="disabled")
 
     def refresh(self):
+        log_dir = self.log_directories[self.log_dir.get()]
+        self.log_path.config(text=str(log_dir))
         selected = _selected_id(self.files)
         try:
-            files = sorted((p for p in paths.CALENDAR_LOG_DIR.iterdir() if p.is_file()),
+            files = sorted((p for p in log_dir.iterdir() if p.is_file()),
                            key=lambda p: p.name.casefold(), reverse=True)
         except FileNotFoundError:
             files = []
-            error = f"La carpeta de logs no existe: {paths.CALENDAR_LOG_DIR}"
+            error = f"La carpeta de logs no existe: {log_dir}"
         except OSError as exc:
             files = []
             error = f"No se pudieron leer los logs: {exc}"
@@ -1153,7 +1205,7 @@ ORIGEN DE LOS EQUIPOS
 Las IPs de los equipos y sus asignaciones (usuarios) se leen, en modo solo lectura, del fichero assignments.json de MapPulse. Todas las programaciones se guardan en los ficheros propios de PowerPulse.
 
 PROGRAMACIONES
-Cada programación puede dirigirse a un equipo individual o a todos los equipos de MapPulse con exclusiones. La opción de todos incluye automáticamente los nuevos equipos cuando PowerPulse está abierto y detecta cambios; con la aplicación cerrada se actualiza al volver a abrirla. Los informes de programaciones activas reflejan los equipos actuales, no un registro histórico de cambios en MapPulse. Las programaciones pueden ser únicas, diarias, semanales, mensuales o un rango de días.
+Programaciones 5PM y Programaciones 7AM mantienen listas independientes y generan TXT en regs y regs7, respectivamente. Cada programación puede dirigirse a un equipo individual o a todos los equipos de MapPulse con exclusiones. La opción de todos incluye automáticamente los nuevos equipos cuando PowerPulse está abierto y detecta cambios; con la aplicación cerrada se actualiza al volver a abrirla. Los informes de programaciones activas reflejan los equipos actuales, no un registro histórico de cambios en MapPulse. Las programaciones pueden ser únicas, diarias, semanales, mensuales o un rango de días.
 Se puede añadir una etiqueta personalizada opcional a cada programación; no modifica la asignación del equipo en MapPulse ni el contenido de los TXT.
 
 CALENDARIO
@@ -1169,10 +1221,10 @@ BACKUP
 Copia de la configuración y las programaciones en un .zip, y su posterior restauración. Antes de restaurar se guarda una copia automática del estado actual.
 
 INFORMES Y LOGS
-Informes en XLSX y PDF de las programaciones, en periodo diario, mensual o anual. Logs permite consultar los archivos de {paths.CALENDAR_LOG_DIR}. El log indica que el proceso externo registró el día, no que todos los apagados se hayan realizado correctamente.
+Informes en XLSX y PDF de las programaciones, en periodo diario, mensual o anual. Logs permite consultar las carpetas {paths.CALENDAR_LOG_DIR} (5PM) y {paths.CALENDAR_7AM_LOG_DIR} (7AM). El log indica que el proceso externo registró el día, no que todos los apagados se hayan realizado correctamente.
 
 ARCHIVOS PARA EL CALENDARIO EXTERNO
-Programaciones genera archivos diarios con el nombre YYYY-MM-DD.txt en {schedule_txt.OUTPUT_DIR}. Cada línea contiene un equipo seleccionado con el prefijo UNC (\\\\IP). Se incluyen solo programaciones activas; las repeticiones con fecha final se generan hasta esa fecha y las indefinidas, a 365 días vista. Al iniciar o actualizar se eliminan los TXT generados para fechas pasadas y se conservan en el TXT de hoy solo los equipos con horarios pendientes, sin exigir un log. PowerPulse solo crea estos archivos: no ejecuta apagados ni el .bat externo.
+Cada pestaña genera archivos diarios YYYY-MM-DD.txt en su carpeta: {schedule_txt.OUTPUT_DIR} para 5PM y {schedule_txt.OUTPUT_DIR_7AM} para 7AM. Cada línea contiene un equipo seleccionado con el prefijo UNC (\\\\IP). Las nuevas programaciones generan un archivo cada día desde la fecha inicial hasta la fecha final opcional, a las 17:00 o 07:00 según la pestaña; si no se indica fecha final, se generan a 365 días vista. Al editar también se pueden mantener o cambiar repeticiones existentes. Se incluyen solo programaciones activas; al iniciar o actualizar se eliminan los TXT generados para fechas pasadas y se conservan en el TXT de hoy solo los equipos con horarios pendientes, sin exigir un log. PowerPulse solo crea estos archivos: no ejecuta apagados ni el .bat externo.
 
 BUSCADOR
 Las pestañas con listas disponen de un buscador que filtra por cualquier texto visible.
@@ -1216,6 +1268,25 @@ class App(tk.Tk):
             pass
         store.setup_logging()
         store.log.info("PowerPulse iniciado")
+        try:
+            paths.ensure_calendar_directories()
+        except OSError as exc:
+            store.log.exception("No se pudieron crear las carpetas del calendario externo")
+            messagebox.showerror(
+                "Carpetas del calendario",
+                f"No se pudieron crear las carpetas necesarias en {paths.CALENDAR_DIR}:\n{exc}",
+                parent=self)
+            self.destroy()
+            raise RuntimeError("No se pudieron crear las carpetas del calendario externo.") from exc
+        missing_scripts = paths.missing_calendar_scripts()
+        if missing_scripts:
+            missing = "\n".join(str(paths.CALENDAR_DIR / name) for name in missing_scripts)
+            store.log.warning("Faltan scripts del calendario externo: %s", ", ".join(missing_scripts))
+            messagebox.showinfo(
+                "Scripts del calendario",
+                "No se encontraron estos scripts en la carpeta del calendario:\n"
+                f"{missing}\n\nPowerPulse no los copia ni los ejecuta.",
+                parent=self)
         self.settings = store.load_settings()
         theme.apply(self, self.settings["theme"])
         ok, detail = background.uninstall()
@@ -1324,7 +1395,9 @@ class App(tk.Tk):
         for t in self.nb.tabs():
             self.nb.nametowidget(t).destroy()
         self.tabs = {}
-        for name, cls in (("Programaciones", ScheduleTab), ("Calendario", CalendarTab),
+        for name, cls in (("Programaciones 5PM", ScheduleTab),
+                          ("Programaciones 7AM", lambda parent, app: ScheduleTab(parent, app, "7am")),
+                          ("Calendario", CalendarTab),
                           ("Histórico", ArchiveTab), ("Estadísticas", StatsTab),
                           ("Informes", ReportsTab),
                           ("Backup", BackupTab), ("Logs", LogTab),
@@ -1335,27 +1408,40 @@ class App(tk.Tk):
         self.nb.select(current)
 
     def update_status(self):
-        self.status.set(f" TXT generados: {self._txt_count} | Carpeta: {schedule_txt.OUTPUT_DIR} | "
+        self.status.set(f" TXT generados: {self._txt_count} | Carpetas: "
+                        f"{schedule_txt.OUTPUT_DIR} / {schedule_txt.OUTPUT_DIR_7AM} | "
                         f"Equipos MapPulse: {len(store.load_assignments())}")
 
     def generate_schedule_txts(self, parent, notify: bool = False, *,
-                               now: datetime | None = None, cleanup_elapsed: bool = False):
+                               now: datetime | None = None, cleanup_elapsed: bool = False,
+                               profile: str | None = None):
         signature = self._assignments_signature()
-        try:
-            self._txt_count = schedule_txt.generate(now=now, cleanup_elapsed=cleanup_elapsed)
-        except (OSError, ValueError, KeyError) as exc:
-            self._txt_assignments_signature = signature
-            store.log.exception("No se pudieron generar los TXT diarios")
-            messagebox.showerror("Generar TXT", f"No se pudieron generar los archivos:\n{exc}", parent=parent)
-            return False
+        profiles = (profile,) if profile else ("5pm", "7am")
+        counts = {}
+        for current_profile in profiles:
+            try:
+                counts[current_profile] = schedule_txt.generate(
+                    now=now, cleanup_elapsed=cleanup_elapsed, profile=current_profile)
+            except (OSError, ValueError, KeyError) as exc:
+                self._txt_assignments_signature = signature
+                store.log.exception("No se pudieron generar los TXT diarios del perfil %s",
+                                    current_profile)
+                messagebox.showerror("Generar TXT", f"No se pudieron generar los archivos:\n{exc}",
+                                     parent=parent)
+                return False
+        self._txt_count = sum(counts.values())
         self._txt_generation_date = date.today()
         self._txt_assignments_signature = signature
-        store.log.info("Generación de TXT finalizada: %d archivo(s)", self._txt_count)
+        store.log.info("Generación de TXT finalizada por perfil: %s", counts)
         self.update_status()
         if notify:
-            messagebox.showinfo("Generar TXT",
-                                f"Se generaron {self._txt_count} archivo(s) en:\n{schedule_txt.OUTPUT_DIR}",
-                                parent=parent)
+            destinations = {
+                "5pm": schedule_txt.OUTPUT_DIR,
+                "7am": schedule_txt.OUTPUT_DIR_7AM,
+            }
+            detail = "\n".join(f"{count} archivo(s) en {destinations[key]}"
+                               for key, count in counts.items())
+            messagebox.showinfo("Generar TXT", f"Se generaron:\n{detail}", parent=parent)
         return True
 
     def refresh_all(self):

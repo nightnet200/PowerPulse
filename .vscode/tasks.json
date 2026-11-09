@@ -1,0 +1,12 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Ejecutar PowerPulse",
+			"type": "shell",
+			"command": "c:\\Users\\33334082K\\Desktop\\Dev\\PowerPulse\\.venv\\Scripts\\python.exe c:\\Users\\33334082K\\Desktop\\Dev\\PowerPulse\\run.py",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}

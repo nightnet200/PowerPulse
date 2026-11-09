@@ -17,7 +17,9 @@ class CalendarCleanupTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.output = root / "regs"
         self.logs = root / "logs"
+        self.logs_7am = root / "logs7"
         self.logs.mkdir()
+        self.logs_7am.mkdir()
         self.manifest = root / "manifest.json"
         self.schedules_path = root / "schedules.json"
         self.schedules = store.JsonStore(self.schedules_path, "TEST")
@@ -25,6 +27,7 @@ class CalendarCleanupTests(unittest.TestCase):
         patches = [
             patch.object(paths, "SCHEDULES_FILE", self.schedules_path),
             patch.object(paths, "CALENDAR_LOG_DIR", self.logs),
+            patch.object(paths, "CALENDAR_7AM_LOG_DIR", self.logs_7am),
             patch.object(schedule_txt, "OUTPUT_DIR", self.output),
             patch.object(schedule_txt, "MANIFEST_FILE", self.manifest),
             patch.object(store, "schedules", self.schedules),
@@ -155,6 +158,12 @@ class CalendarCleanupTests(unittest.TestCase):
         self.assertEqual(tab.text.get("1.0", "end-1c"), "registrado")
         tab.filter.set("ausente")
         self.assertEqual(tab.text.get("1.0", "end-1c"), "")
+        log_7am = self.logs_7am / "up_2026-11-06.log"
+        log_7am.write_text("registro 7AM", encoding="utf-8")
+        tab.filter.set("")
+        tab.log_dir.set("7AM")
+        self.assertEqual(tab.text.get("1.0", "end-1c"), "registro 7AM")
+        self.assertEqual(tab.log_path.cget("text"), str(self.logs_7am))
 
 
 if __name__ == "__main__":

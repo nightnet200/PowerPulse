@@ -2,10 +2,10 @@
 
 
 a = Analysis(
-    ['C:/Users/33334082K/Desktop/Dev/PowerPulse/run.py'],
+    ['../run.py'],
     pathex=[],
     binaries=[],
-    datas=[('C:/Users/33334082K/Desktop/Dev/PowerPulse/assets/icon.ico', 'assets')],
+    datas=[('assets/icon.ico', 'assets')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,5 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['C:/Users/33334082K/Desktop/Dev/PowerPulse/assets/icon.ico'],
+    icon=['assets/icon.ico'],
 )

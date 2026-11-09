@@ -17,7 +17,12 @@ ARCHIVE_FILE = DATA_DIR / "historico.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 LOG_DIR = DATA_DIR / "logs"
 LOG_FILE = LOG_DIR / "powerpulse.log"
-CALENDAR_LOG_DIR = Path(r"C:\ShutPCs\Calendario\logs")
+CALENDAR_DIR = Path(r"C:\ShutPCs\Calendario")
+CALENDAR_LOG_DIR = CALENDAR_DIR / "logs"
+CALENDAR_REGS_DIR = CALENDAR_DIR / "regs"
+CALENDAR_7AM_LOG_DIR = CALENDAR_DIR / "logs7"
+CALENDAR_7AM_REGS_DIR = CALENDAR_DIR / "regs7"
+CALENDAR_SCRIPTS = ("downcal7.bat", "downcal17.bat")
 REPORTS_DIR = DATA_DIR / "Informes"
 LEGACY_REPORTS_DIR = DATA_DIR / "reports"
 
@@ -33,3 +38,12 @@ if LEGACY_REPORTS_DIR.is_dir():
         LEGACY_REPORTS_DIR.rmdir()
     except OSError:
         pass
+
+
+def ensure_calendar_directories(root: Path = CALENDAR_DIR) -> None:
+    for directory in (root, root / "logs", root / "regs", root / "logs7", root / "regs7"):
+        directory.mkdir(parents=True, exist_ok=True)
+
+
+def missing_calendar_scripts(root: Path = CALENDAR_DIR) -> list[str]:
+    return [name for name in CALENDAR_SCRIPTS if not (root / name).is_file()]

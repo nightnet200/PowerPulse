@@ -6,10 +6,12 @@ LIGHT, DARK = "light", "dark"
 _PALETTES = {
     LIGHT: {"bg": "#f0f0f0", "fg": "#000000", "field": "#ffffff", "button": "#e1e1e1", "hover": "#e9e9e9",
             "border": "#adadad", "muted": "#6d6d6d", "sel": "#7fb6ff", "selfg": "#000000",
-            "busy": "#cfe8ff", "today": "#fff2b3", "idle": "#f4f4f4"},
+            "busy": "#cfe8ff", "today": "#fff2b3", "idle": "#f4f4f4",
+            "schedule_5pm": "#008000", "schedule_7am": "#c00000"},
     DARK: {"bg": "#202020", "fg": "#f0f0f0", "field": "#2b2b2b", "button": "#3a3a3a", "hover": "#4a4a4a",
            "border": "#555555", "muted": "#888888", "sel": "#0067c0", "selfg": "#ffffff",
-           "busy": "#1f4e78", "today": "#7a6a1a", "idle": "#2b2b2b"},
+           "busy": "#1f4e78", "today": "#7a6a1a", "idle": "#2b2b2b",
+           "schedule_5pm": "#7cfc98", "schedule_7am": "#ff6b6b"},
 }
 _current = LIGHT
 _native_theme: str | None = None

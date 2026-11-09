@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 from powerpulse import background
 
 APP = "PowerPulse"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 PUBLISHER = "PowerPulse"
 UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP}"
 NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)

@@ -17,7 +17,9 @@ class ScheduleModesTests(unittest.TestCase):
         root = Path(self.temp.name)
         self.assignments = root / "assignments.json"
         self.output = root / "regs"
+        self.output_7am = root / "regs7"
         self.manifest = root / "manifest.json"
+        self.manifest_7am = root / "manifest_7am.json"
         self.schedules = store.JsonStore(root / "schedules.json", "TEST")
         self.archive = store.JsonStore(root / "historico.json", "TEST")
         for target, attribute, value in (
@@ -25,6 +27,8 @@ class ScheduleModesTests(unittest.TestCase):
             (paths, "SCHEDULES_FILE", self.schedules.path),
             (schedule_txt, "OUTPUT_DIR", self.output),
             (schedule_txt, "MANIFEST_FILE", self.manifest),
+            (schedule_txt, "OUTPUT_DIR_7AM", self.output_7am),
+            (schedule_txt, "MANIFEST_FILE_7AM", self.manifest_7am),
             (store, "schedules", self.schedules),
             (store, "archive", self.archive),
         ):
@@ -73,6 +77,61 @@ class ScheduleModesTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(self.manifest.read_bytes(), manifest)
 
+    def test_schedule_profiles_generate_into_independent_folders(self):
+        self.add_schedule(profile="5pm", target_mode="individual", ips=["10.0.0.1"])
+        self.add_schedule(profile="7am", time="07:00", repeat="daily",
+                          target_mode="individual", ips=["10.0.0.2"])
+
+        schedule_txt.generate(self.day, profile="5pm")
+        pm_file = self.output / f"{self.day.isoformat()}.txt"
+        am_file = self.output_7am / f"{self.day.isoformat()}.txt"
+        self.assertTrue(pm_file.is_file())
+        self.assertFalse(am_file.exists())
+        self.assertEqual(pm_file.read_text().splitlines(), [r"\\10.0.0.1"])
+
+        schedule_txt.generate(self.day, profile="7am")
+        self.assertEqual(pm_file.read_text().splitlines(), [r"\\10.0.0.1"])
+        self.assertEqual(am_file.read_text().splitlines(), [r"\\10.0.0.2"])
+        self.assertTrue(self.manifest.is_file())
+        self.assertTrue(self.manifest_7am.is_file())
+
+    def test_schedule_tabs_show_independent_lists(self):
+        pm = self.add_schedule(profile="5pm", target_mode="individual", ips=["10.0.0.1"])
+        am = self.add_schedule(profile="7am", time="07:00", repeat="daily",
+                               target_mode="individual", ips=["10.0.0.2"])
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        app = SimpleNamespace(refresh_and_cleanup=lambda: None)
+        pm_tab = gui.ScheduleTab(root, app)
+        am_tab = gui.ScheduleTab(root, app, "7am")
+        self.addCleanup(pm_tab.destroy)
+        self.addCleanup(am_tab.destroy)
+        pm_tab.refresh()
+        am_tab.refresh()
+        self.assertEqual(pm_tab.tree.get_children(), (pm["id"],))
+        self.assertEqual(am_tab.tree.get_children(), (am["id"],))
+        self.assertEqual(pm_tab.tree.item(pm["id"], "tags"), ("schedule_5pm",))
+        self.assertEqual(am_tab.tree.item(am["id"], "tags"), ("schedule_7am",))
+        self.assertEqual(pm_tab.tree.tag_configure("schedule_5pm")["foreground"],
+                         gui.theme.pal()["schedule_5pm"])
+        self.assertEqual(am_tab.tree.tag_configure("schedule_7am")["foreground"],
+                         gui.theme.pal()["schedule_7am"])
+        calendar_tab = gui.CalendarTab(root, app)
+        self.addCleanup(calendar_tab.destroy)
+        calendar_tab.sel = self.day
+        calendar_tab.mode.set("day")
+        calendar_tab.refresh()
+        self.assertEqual(calendar_tab.tree.item(pm["id"], "tags"), ("schedule_5pm",))
+        self.assertEqual(calendar_tab.tree.item(am["id"], "tags"), ("schedule_7am",))
+        calendar_tab.filter.set("10.0.0.2")
+        self.assertEqual(calendar_tab.stree.get_children(), (am["id"],))
+        self.assertEqual(calendar_tab.stree.item(am["id"], "tags"), ("schedule_7am",))
+        self.assertEqual(calendar_tab.stree.tag_configure("schedule_5pm")["foreground"],
+                         gui.theme.pal()["schedule_5pm"])
+        self.assertEqual(calendar_tab.stree.tag_configure("schedule_7am")["foreground"],
+                         gui.theme.pal()["schedule_7am"])
+
     def test_auto_refresh_regenerates_after_assignments_change(self):
         self.add_schedule(target_mode="all", ips=[], excluded_ips=[])
         original_signature = gui.App._assignments_signature()
@@ -120,12 +179,28 @@ class ScheduleModesTests(unittest.TestCase):
         result = dialog.collect()
         self.assertEqual((result["target_mode"], result["ips"], result["excluded_ips"]),
                          ("individual", ["10.0.0.1"], []))
+        self.assertEqual(result["timing"], {
+            "start_date": self.day.isoformat(), "time": "17:00", "repeat": "daily",
+            "until": None, "weekdays": [], "enabled": True,
+        })
+        dialog.timing.until.set((self.day + timedelta(days=2)).strftime("%d/%m/%Y"))
+        result = dialog.collect()
+        self.assertEqual(result["timing"]["until"], (self.day + timedelta(days=2)).isoformat())
+        dialog.timing.until.set((self.day - timedelta(days=1)).strftime("%d/%m/%Y"))
+        with self.assertRaises(ValueError):
+            dialog.collect()
+        dialog.timing.until.set("")
+        dialog_7am = gui.ScheduleDialog(root, None, self.day, fixed_time="07:00")
+        self.addCleanup(dialog_7am.destroy)
+        self.assertEqual(dialog_7am.timing.values()["time"], "07:00")
         dialog.mode.set("all")
         dialog._show_mode()
         dialog.excluded_ips = {"10.0.0.2"}
         result = dialog.collect()
         self.assertEqual((result["target_mode"], result["ips"], result["excluded_ips"]),
                          ("all", [], ["10.0.0.2"]))
+        self.assertEqual(result["timing"]["time"], "17:00")
+        self.assertEqual(result["timing"]["repeat"], "daily")
         dialog.excluded_ips.add("10.0.0.1")
         with self.assertRaises(ValueError):
             dialog.collect()
@@ -137,6 +212,9 @@ class ScheduleModesTests(unittest.TestCase):
         result = editor.collect()
         self.assertEqual((result["target_mode"], result["ips"], result["excluded_ips"]),
                          ("selected", ["10.0.0.1", "10.0.0.2"], ["10.0.0.2"]))
+        self.assertFalse(editor.timing.date_only)
+        self.assertEqual(result["timing"]["time"], old["time"])
+        self.assertEqual(result["timing"]["repeat"], old["repeat"])
 
     def test_custom_label_persists_on_create_and_edit_and_in_report(self):
         root = tk.Tk()
@@ -150,7 +228,7 @@ class ScheduleModesTests(unittest.TestCase):
             result = dialog.collect()
             self.assertEqual(result["schedule_label"], "Aula informática")
 
-            app = SimpleNamespace(generate_schedule_txts=lambda *_: None, refresh_all=lambda: None)
+            app = SimpleNamespace(generate_schedule_txts=lambda *_, **__: None, refresh_all=lambda: None)
             parent = SimpleNamespace(wait_window=lambda _: None)
             with patch.object(gui, "ScheduleDialog", return_value=SimpleNamespace(result=result)):
                 gui.schedule_new(app, parent, self.day)

@@ -2,6 +2,12 @@
 
 REM Apagar PCs incluidos en el archivo nombrado por fecha
 
+REM Diego Roibás Tella
+REM Gerencia Territorial del Catastro en Lugo
+REM 31 de marzo de 2023
+REM v.1.0
+REM 09 de noviembre de 2026
+REM v.2.0
 
 REM Fijar variables temporales
 SET anio=%date:~6,4%
