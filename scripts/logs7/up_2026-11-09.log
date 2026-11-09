@@ -1,0 +1,28 @@
+APAGADO LAN - 09/11/2026 14:12:39,92 
+========================================== 
+------------------------------------------ 
+IP: \\10.57.129.212 
+EQUIPO: \\POLUG212 
+VALIDO: \\POLUG212 
+------------------------------------------ 
+IP: \\10.57.129.213 
+EQUIPO: \\POLUG213 
+VALIDO: \\POLUG213 
+------------------------------------------ 
+IP: \\10.57.129.220 
+EQUIPO: \\POLUG220 
+VALIDO: \\POLUG220 
+------------------------------------------ 
+IP: \\10.57.129.223 
+EQUIPO: \\POLUG223 
+POLUG223: El nombre de equipo escrito no es v lido o no se admite el apagado remoto en el equipo de destino. Compruebe el nombre e int‚ntelo de nuevo o p¢ngase en contacto con el administrador del sistema.(53)
+NO VALIDO: \\POLUG223 - ERROR 53 
+------------------------------------------ 
+IP: \\10.57.129.226 
+EQUIPO: \\POLUG226 
+POLUG226: El nombre de equipo escrito no es v lido o no se admite el apagado remoto en el equipo de destino. Compruebe el nombre e int‚ntelo de nuevo o p¢ngase en contacto con el administrador del sistema.(53)
+NO VALIDO: \\POLUG226 - ERROR 53 
+ 
+TOTAL: 5 
+SOLICITUDES ACEPTADAS: 3 
+ERRORES: 2 

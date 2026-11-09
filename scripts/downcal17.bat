@@ -98,5 +98,10 @@ ECHO ERRORES: !ERRORES! >> "%LOG%"
 ECHO.
 ECHO LOG: %LOG%
 ECHO ==========================================
-PAUSE
+
+REM ==================================================
+REM FINALIZAR PROCESO
+REM ==================================================
+
 ENDLOCAL
+EXIT /B 0
