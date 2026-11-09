@@ -1,37 +1,21 @@
+
 @ECHO OFF
-
-REM Apagar PCs incluidos en el archivo nombrado por fecha
-
-REM Diego Roibás Tella
-REM Gerencia Territorial del Catastro en Lugo
-REM 31 de marzo de 2023
-REM v.1.0
-REM 09 de noviembre de 2026
-REM v.2.0
-
 SETLOCAL EnableExtensions EnableDelayedExpansion
-TITLE APAGADO PROGRAMADO EQUIPOS LAN
+TITLE APAGADO EQUIPOS LAN - REGS
 COLOR 0B
 
 REM ==================================================
-REM APAGADO PROGRAMADO DE EQUIPOS LAN
+REM CONFIGURACION
 REM ==================================================
 
-REM Obtener fecha en formato AA-MM-DD
-SET "ANIO=%DATE:~6,4%"
-SET "MES=%DATE:~3,2%"
-SET "DIA=%DATE:~0,2%"
-SET "ANIO2=%ANIO:~2,2%"
-SET "FECHA=%ANIO2%-%MES%-%DIA%"
+REM Obtener fecha independiente del formato regional
+FOR /F %%I IN ('POWERSHELL -NoProfile -Command "Get-Date -Format yyyy-MM-dd"') DO SET "FECHA=%%I"
 
-REM Directorios
 SET "DIR_REGS=C:\ShutPCs\Calendario\regs"
 SET "DIR_LOGS=C:\ShutPCs\Calendario\logs"
 
 SET "FICHERO=%DIR_REGS%\%FECHA%.txt"
 SET "LOG=%DIR_LOGS%\up_%FECHA%.log"
-SET "INFO=%DIR_REGS%\%FECHA%.log"
-SET "LOGINFO=%DIR_LOGS%\infoup_%FECHA%.log"
 
 ECHO ==========================================
 ECHO APAGADO PROGRAMADO DE EQUIPOS LAN
@@ -41,7 +25,8 @@ ECHO.
 
 REM Comprobar calendario
 IF NOT EXIST "%FICHERO%" (
-    ECHO ERROR: No existe %FICHERO%
+    ECHO ERROR: No existe el fichero:
+    ECHO %FICHERO%
     PAUSE
     EXIT /B 1
 )
@@ -49,52 +34,69 @@ IF NOT EXIST "%FICHERO%" (
 REM Crear directorio de logs
 IF NOT EXIST "%DIR_LOGS%" MKDIR "%DIR_LOGS%"
 
-REM Iniciar log
-ECHO APAGADO PROGRAMADO - %DATE% %TIME% > "%LOG%"
+REM Inicializar registro
+ECHO APAGADO LAN - %DATE% %TIME% > "%LOG%"
 ECHO ========================================== >> "%LOG%"
 
-REM Procesar equipos
+REM Contadores
+SET /A TOTAL=0
+SET /A CORRECTOS=0
+SET /A ERRORES=0
+
+REM Procesar calendario
 FOR /F "usebackq tokens=* delims=" %%X IN ("%FICHERO%") DO (
-    IF NOT "%%X"=="" (
 
-        REM Extraer ultimo bloque de la IP
-        SET "IP=%%X"
+    SET "IP=%%X"
+
+    IF NOT "!IP!"=="" (
+
         SET "ID=!IP:~-3!"
-
-        REM Construir nombre del equipo
         SET "EQUIPO=\\POLUG!ID!"
 
-        ECHO.
-        ECHO *** Shutdown !EQUIPO!
-        ECHO *** Shutdown !EQUIPO! >> "%LOG%"
+        SET /A TOTAL+=1
 
-        REM Ejecutar apagado remoto
-        SHUTDOWN /S /M !EQUIPO! /C "Apagado en 5 minutos. Guarde sus trabajos." /T 300
+        ECHO.
+        ECHO ==========================================
+        ECHO IP: !IP!
+        ECHO EQUIPO: !EQUIPO!
+        ECHO Ejecutando apagado...
+
+        ECHO ------------------------------------------ >> "%LOG%"
+        ECHO IP: !IP! >> "%LOG%"
+        ECHO EQUIPO: !EQUIPO! >> "%LOG%"
+
+        REM Ejecutar exactamente el comando conocido
+        SHUTDOWN /S /M !EQUIPO! /C "Cerrando" >> "%LOG%" 2>&1
 
         SET "RESULTADO=!ERRORLEVEL!"
 
         IF !RESULTADO! EQU 0 (
             ECHO VALIDO: !EQUIPO!
             ECHO VALIDO: !EQUIPO! >> "%LOG%"
+            SET /A CORRECTOS+=1
         ) ELSE (
-            ECHO NO VALIDO: !EQUIPO! - Error !RESULTADO!
-            ECHO NO VALIDO: !EQUIPO! - Error !RESULTADO! >> "%LOG%"
+            ECHO NO VALIDO: !EQUIPO! - ERROR !RESULTADO!
+            ECHO NO VALIDO: !EQUIPO! - ERROR !RESULTADO! >> "%LOG%"
+            SET /A ERRORES+=1
         )
     )
 )
 
-REM Copiar fichero de informacion si existe
-IF EXIST "%INFO%" (
-    COPY /Y "%INFO%" "%LOGINFO%" >NUL
-)
-
 ECHO.
 ECHO ==========================================
-ECHO PROCESO FINALIZADO
+ECHO RESUMEN DEL PROCESO
+ECHO ==========================================
+ECHO Equipos procesados: !TOTAL!
+ECHO Solicitudes aceptadas: !CORRECTOS!
+ECHO Errores: !ERRORES!
+
+ECHO. >> "%LOG%"
+ECHO TOTAL: !TOTAL! >> "%LOG%"
+ECHO SOLICITUDES ACEPTADAS: !CORRECTOS! >> "%LOG%"
+ECHO ERRORES: !ERRORES! >> "%LOG%"
+
+ECHO.
 ECHO LOG: %LOG%
 ECHO ==========================================
-ECHO.
-
 PAUSE
 ENDLOCAL
-

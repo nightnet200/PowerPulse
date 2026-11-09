@@ -132,6 +132,26 @@ class ScheduleModesTests(unittest.TestCase):
         self.assertEqual(calendar_tab.stree.tag_configure("schedule_7am")["foreground"],
                          gui.theme.pal()["schedule_7am"])
 
+    def test_schedule_table_headers_sort_alphanumeric_values_both_directions(self):
+        root = tk.Tk()
+        root.withdraw()
+        self.addCleanup(root.destroy)
+        tree = gui._make_tree(root, {"Valor": 100, "Otro": 100})
+        tree.insert("", "end", iid="two", values=("2", "b"))
+        tree.insert("", "end", iid="ten", values=("10", "A"))
+        tree.insert("", "end", iid="letter", values=("A", "10"))
+
+        tree.tk.call(tree.heading("Valor", "command"))
+        self.assertEqual(tree.get_children(), ("two", "ten", "letter"))
+        self.assertEqual(tree.heading("Valor", "text"), "Valor ▲")
+
+        tree.tk.call(tree.heading("Valor", "command"))
+        self.assertEqual(tree.get_children(), ("letter", "ten", "two"))
+        self.assertEqual(tree.heading("Valor", "text"), "Valor ▼")
+
+        tree.tk.call(tree.heading("Otro", "command"))
+        self.assertEqual(tree.get_children(), ("letter", "ten", "two"))
+
     def test_auto_refresh_regenerates_after_assignments_change(self):
         self.add_schedule(target_mode="all", ips=[], excluded_ips=[])
         original_signature = gui.App._assignments_signature()

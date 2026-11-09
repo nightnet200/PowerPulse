@@ -1,6 +1,7 @@
 import calendar
 import hashlib
 import os
+import re
 import tkinter as tk
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -22,12 +23,44 @@ def _selected_id(tree: ttk.Treeview) -> str | None:
     return sel[0] if sel else None
 
 
+def _alphanumeric_key(value: str) -> tuple[tuple[int, int | str], ...]:
+    return tuple((0, int(part)) if part.isdigit() else (1, part.casefold())
+                 for part in re.split(r"(\d+)", value))
+
+
+def _sort_tree(tree: ttk.Treeview, column: str, descending: bool | None = None):
+    if descending is None:
+        descending = not tree._sort_reverse if tree._sort_column == column else False
+
+    children = tree.get_children("")
+    for index, iid in enumerate(sorted(
+            children, key=lambda item: _alphanumeric_key(tree.set(item, column)),
+            reverse=descending)):
+        tree.move(iid, "", index)
+
+    previous_column = tree._sort_column
+    tree._sort_column = column
+    tree._sort_reverse = descending
+    if previous_column:
+        tree.heading(previous_column, text=tree._sort_headers[previous_column])
+    arrow = " ▼" if descending else " ▲"
+    tree.heading(column, text=tree._sort_headers[column] + arrow)
+
+
+def _restore_tree_sort(tree: ttk.Treeview):
+    if tree._sort_column:
+        _sort_tree(tree, tree._sort_column, tree._sort_reverse)
+
+
 def _make_tree(parent, columns: dict[str, int]) -> ttk.Treeview:
     frame = ttk.Frame(parent)
     frame.pack(fill="both", expand=True)
     tree = ttk.Treeview(frame, columns=list(columns), show="headings", selectmode="browse")
+    tree._sort_headers = {name: name for name in columns}
+    tree._sort_column = None
+    tree._sort_reverse = False
     for name, width in columns.items():
-        tree.heading(name, text=name)
+        tree.heading(name, text=name, command=lambda column=name: _sort_tree(tree, column))
         tree.column(name, width=width, anchor="w")
     sb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
     tree.configure(yscrollcommand=sb.set)
@@ -579,6 +612,7 @@ class ScheduleTab(ttk.Frame):
             if not _matches(needle, [*row, *_schedule_search_values(s)]):
                 continue
             self.tree.insert("", "end", iid=s["id"], values=row, tags=(self.row_tag,))
+        _restore_tree_sort(self.tree)
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
 
@@ -729,6 +763,7 @@ class CalendarTab(ttk.Frame):
                 s["time"], _schedule_equipment_text(s), _schedule_label(s), REPEATS[s["repeat"]],
                 status_for(s, self.sel, hist), s.get("notes", "")),
                 tags=("schedule_7am" if s.get("profile") == "7am" else "schedule_5pm",))
+        _restore_tree_sort(self.tree)
 
     def _fill_search(self):
         needle = self.filter.get().strip()
@@ -750,6 +785,7 @@ class CalendarTab(ttk.Frame):
                 found.append((focus, s["time"], s["id"], row, tag))
         for _, _, sid, row, tag in sorted(found):
             self.stree.insert("", "end", iid=sid, values=row, tags=(tag,))
+        _restore_tree_sort(self.stree)
         self.panel.config(text=f"Búsqueda en todas las fechas: {len(found)} resultado(s). "
                                "La fecha es la próxima o, si ya pasó, la última.")
         if sel and self.stree.exists(sel):
@@ -820,6 +856,7 @@ class ArchiveTab(ttk.Frame):
                 self.rows.append(row)
                 self.tree.insert("", "end", iid=("archivo:" if archived else "activa:") + a["id"], values=row)
         self.summary.config(text=f"{len(self.rows)} de {len(items)} programaciones registradas.")
+        _restore_tree_sort(self.tree)
         if sel and self.tree.exists(sel):
             self.tree.selection_set(sel)
 
