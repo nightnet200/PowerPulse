@@ -274,12 +274,6 @@ class TimingForm(ttk.Frame):
         self.until_lbl = ttk.Label(self)
         self.until_lbl.grid(row=0, column=2, sticky="w", padx=(12, 0))
         DatePicker(self, self.until, 14, allow_empty=True).grid(row=0, column=3, sticky="w")
-        ttk.Label(self, text="Hora (HH:MM):").grid(row=1, column=0, sticky="w", pady=2)
-        TimePicker(self, self.time).grid(row=1, column=1, sticky="w")
-        ttk.Label(self, text="Repetición:").grid(row=1, column=2, sticky="w", padx=(12, 0))
-        ttk.Combobox(self, textvariable=self.repeat, values=list(REPEATS.values()),
-                     state="readonly", width=14).grid(row=1, column=3, sticky="w")
-        self.repeat.trace_add("write", lambda *_: self._update_until_label())
         self._update_until_label()
         wdf = ttk.Frame(self)
         wdf.grid(row=2, column=0, columnspan=4, sticky="w", pady=2)

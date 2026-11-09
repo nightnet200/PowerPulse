@@ -205,16 +205,22 @@ class ScheduleModesTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             dialog.collect()
 
-        old = self.add_schedule(ips=["10.0.0.1", "10.0.0.2"], excluded_ips=["10.0.0.2"])
+        old = self.add_schedule(time="11:45", repeat="weekly", weekdays=[1, 3],
+                    ips=["10.0.0.1", "10.0.0.2"], excluded_ips=["10.0.0.2"])
         editor = gui.ScheduleDialog(root, old, self.day)
         self.addCleanup(editor.destroy)
         self.assertEqual(editor.mode.get(), "saved")
+        timing_labels = [widget.cget("text") for widget in editor.timing.winfo_children()
+                 if widget.winfo_class() == "TLabel"]
+        self.assertNotIn("Hora (HH:MM):", timing_labels)
+        self.assertNotIn("Repetición:", timing_labels)
         result = editor.collect()
         self.assertEqual((result["target_mode"], result["ips"], result["excluded_ips"]),
                          ("selected", ["10.0.0.1", "10.0.0.2"], ["10.0.0.2"]))
         self.assertFalse(editor.timing.date_only)
         self.assertEqual(result["timing"]["time"], old["time"])
         self.assertEqual(result["timing"]["repeat"], old["repeat"])
+        self.assertEqual(result["timing"]["weekdays"], old["weekdays"])
 
     def test_custom_label_persists_on_create_and_edit_and_in_report(self):
         root = tk.Tk()
