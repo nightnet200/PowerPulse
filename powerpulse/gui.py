@@ -1232,7 +1232,6 @@ Las pestañas con listas disponen de un buscador que filtra por cualquier texto 
 TEMA
 El tema claro u oscuro se elige en Archivo > Tema y se recuerda al cerrar.
 
-DATOS: {paths.DATA_DIR}
 """
 
 
